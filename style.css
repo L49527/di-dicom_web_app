@@ -1,0 +1,26 @@
+/* Tailwind takes care of most things, we just need custom scrollbars */
+
+::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    background: rgba(0, 0, 0, 0.15);
+    /* Light gray for light theme */
+    border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: rgba(0, 0, 0, 0.25);
+}
+
+/* Ensure the drop zone feels right */
+.drag-over {
+    border-color: #2563eb !important;
+    background-color: rgba(59, 130, 246, 0.1) !important;
+}
