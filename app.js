@@ -11,6 +11,7 @@ let processingMode = null;
 let importedPatientMapping = new Map();
 let importedCsvWarnings = [];
 let importedCsvName = '';
+let importedCsvIncludesStudyDate = false;
 let patientMapping = new Map();
 let accessionMapping = new Map();
 let mappingLog = [];
@@ -180,11 +181,13 @@ function applyMappingCsvText(text, fileName) {
     importedPatientMapping = result.mapping;
     importedCsvWarnings = result.warnings;
     importedCsvName = fileName;
+    importedCsvIncludesStudyDate = result.includesStudyDate;
 
     const duplicateText = importedCsvWarnings.length > 0
         ? `；另有 ${importedCsvWarnings.length} 列重複資料已去重`
         : '';
-    setCsvStatus(`✓ ${fileName}：${importedPatientMapping.size} 組有效對應${duplicateText}`, importedCsvWarnings.length ? 'warning' : 'success');
+    const matchLabel = importedCsvIncludesStudyDate ? 'ID＋StudyDate' : 'Patient ID（舊版格式）';
+    setCsvStatus(`✓ ${fileName}：${importedPatientMapping.size} 組有效 ${matchLabel} 對應${duplicateText}`, importedCsvWarnings.length ? 'warning' : 'success');
     logToTerminal(`CSV mapping loaded: ${fileName}, ${importedPatientMapping.size} valid mappings.`, 'success');
     showToast(`已匯入 ${importedPatientMapping.size} 組 Patient ID 對應`, 'success');
     checkReady();
@@ -198,6 +201,7 @@ mappingCsvInput.addEventListener('change', async event => {
     importedPatientMapping = new Map();
     importedCsvWarnings = [];
     importedCsvName = '';
+    importedCsvIncludesStudyDate = false;
     setCsvStatus('正在驗證 CSV…', 'idle');
     checkReady();
 
@@ -220,7 +224,7 @@ downloadCsvTemplate.addEventListener('click', () => {
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     anchor.href = url;
-    anchor.download = 'PatientID_Mapping_Template.csv';
+    anchor.download = 'PatientID_StudyDate_Mapping_Template.csv';
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
@@ -382,7 +386,7 @@ startBtn.addEventListener('click', async () => {
     const tagsToClear = getSelectedTags();
     const mappingKeys = new Set();
     const studyFileCounts = new Map();
-    const seenCsvPatientIds = new Set();
+    const seenCsvMappingKeys = new Set();
     const modeLabel = processingMode === 'csv'
         ? `CSV whitelist (${importedCsvName}, ${importedPatientMapping.size} patients)`
         : 'automatic numbering';
@@ -406,6 +410,7 @@ startBtn.addEventListener('click', async () => {
             const accessionElement = dataSet.elements.x00080050;
             const cleanOriginalPatientId = cleanDicomString(dataSet.string('x00100020'));
             const cleanOriginalAccession = cleanDicomString(dataSet.string('x00080050'));
+            const cleanOriginalStudyDate = cleanDicomString(dataSet.string('x00080020'));
             const modality = cleanDicomString(dataSet.string('x00080060')) || 'UNK';
             const transferSyntaxUid = cleanDicomString(dataSet.string('x00020010'));
 
@@ -414,12 +419,15 @@ startBtn.addEventListener('click', async () => {
 
             let newPatientId;
             if (processingMode === 'csv') {
-                if (!importedPatientMapping.has(cleanOriginalPatientId)) {
+                const csvMappingKey = importedCsvIncludesStudyDate
+                    ? Core.createPatientStudyKey(cleanOriginalPatientId, cleanOriginalStudyDate)
+                    : cleanOriginalPatientId;
+                if (!importedPatientMapping.has(csvMappingKey)) {
                     skippedCount++;
                     continue;
                 }
-                seenCsvPatientIds.add(cleanOriginalPatientId);
-                newPatientId = importedPatientMapping.get(cleanOriginalPatientId);
+                seenCsvMappingKeys.add(csvMappingKey);
+                newPatientId = importedPatientMapping.get(csvMappingKey);
             } else {
                 newPatientId = getSequenceId(cleanOriginalPatientId, '', patientMapping);
             }
@@ -467,12 +475,16 @@ startBtn.addEventListener('click', async () => {
             studyFileCounts.set(studyFileKey, nextFileNumber);
             successCount++;
 
-            const mappingKey = createMappingKey(cleanOriginalPatientId, cleanOriginalAccession);
+            const mappingKey = createMappingKey(
+                createMappingKey(cleanOriginalPatientId, cleanOriginalStudyDate),
+                cleanOriginalAccession
+            );
             if (!mappingKeys.has(mappingKey)) {
                 mappingKeys.add(mappingKey);
                 mappingLog.push({
                     modality,
                     origPatientID: cleanOriginalPatientId,
+                    origStudyDate: cleanOriginalStudyDate,
                     newPatientID: newPatientId,
                     origAccessionNo: cleanOriginalAccession,
                     newAccessionNo
@@ -495,11 +507,12 @@ startBtn.addEventListener('click', async () => {
     logToTerminal('Generating Mapping.csv at output root…', 'system');
 
     try {
-        let csvContent = 'Modality,Original_PatientID,New_PatientID,Original_AccessionNo,New_AccessionNo\n';
+        let csvContent = 'Modality,Original_PatientID,Original_StudyDate,New_PatientID,Original_AccessionNo,New_AccessionNo\n';
         mappingLog.forEach(row => {
             csvContent += [
                 row.modality,
                 row.origPatientID,
+                row.origStudyDate,
                 row.newPatientID,
                 row.origAccessionNo,
                 row.newAccessionNo
@@ -517,9 +530,10 @@ startBtn.addEventListener('click', async () => {
     }
 
     const csvNotFoundCount = processingMode === 'csv'
-        ? importedPatientMapping.size - seenCsvPatientIds.size
+        ? importedPatientMapping.size - seenCsvMappingKeys.size
         : 0;
-    const summary = `成功 ${successCount}、名單外略過 ${skippedCount}、DICOM 錯誤 ${errorCount}、CSV 未找到 ${csvNotFoundCount}`;
+    const csvMissingLabel = importedCsvIncludesStudyDate ? 'CSV 未找到 ID＋日期' : 'CSV 未找到 ID';
+    const summary = `成功 ${successCount}、ID／日期不符略過 ${skippedCount}、DICOM 錯誤 ${errorCount}、${csvMissingLabel} ${csvNotFoundCount}`;
     progressStatus.textContent = mappingWriteFailed ? `影像處理完成，但 Mapping.csv 寫入失敗｜${summary}` : `全部完成｜${summary}`;
     logToTerminal(`Stream Processing Complete! ${summary}${mappingWriteFailed ? '；Mapping.csv write failed' : ''}.`, 'system');
     const completedWithErrors = mappingWriteFailed || errorCount > 0;
@@ -544,6 +558,7 @@ function resetApp() {
     importedPatientMapping = new Map();
     importedCsvWarnings = [];
     importedCsvName = '';
+    importedCsvIncludesStudyDate = false;
     patientMapping.clear();
     accessionMapping.clear();
     mappingLog = [];

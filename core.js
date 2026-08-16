@@ -9,7 +9,10 @@
 }(typeof globalThis !== 'undefined' ? globalThis : this, function () {
     'use strict';
 
-    const CSV_HEADERS = ['Original_PatientID', 'New_PatientID'];
+    const LEGACY_CSV_HEADERS = ['Original_PatientID', 'New_PatientID'];
+    const STUDY_DATE_CSV_HEADERS = ['Original_PatientID', 'Original_StudyDate', 'New_PatientID'];
+    const CSV_HEADERS = STUDY_DATE_CSV_HEADERS;
+    const MAPPING_KEY_SEPARATOR = '\u001F';
     const SAFE_ALIAS_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
     const DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN = '1.2.840.10008.1.2.1.99';
     const IMPLICIT_VR_LITTLE_ENDIAN = '1.2.840.10008.1.2';
@@ -108,6 +111,37 @@
         return rows;
     }
 
+    function headersMatch(actual, expected) {
+        return actual.length === expected.length && actual.every((value, index) => value === expected[index]);
+    }
+
+    function normalizeStudyDate(value) {
+        const raw = String(value ?? '').trim();
+        const compactMatch = /^(\d{4})(\d{2})(\d{2})$/.exec(raw);
+        const separatedMatch = /^(\d{4})([\/-])(\d{2})\2(\d{2})$/.exec(raw);
+        if (!compactMatch && !separatedMatch) {
+            throw new Error('Original_StudyDate 必須是 YYYY/MM/DD、YYYY-MM-DD 或 YYYYMMDD');
+        }
+
+        const yearText = compactMatch ? compactMatch[1] : separatedMatch[1];
+        const monthText = compactMatch ? compactMatch[2] : separatedMatch[3];
+        const dayText = compactMatch ? compactMatch[3] : separatedMatch[4];
+
+        const year = Number(yearText);
+        const month = Number(monthText);
+        const day = Number(dayText);
+        const date = new Date(Date.UTC(year, month - 1, day));
+        if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
+            throw new Error(`Original_StudyDate「${raw}」不是有效日期`);
+        }
+
+        return `${yearText}${monthText}${dayText}`;
+    }
+
+    function createPatientStudyKey(patientId, studyDate) {
+        return `${patientId}${MAPPING_KEY_SEPARATOR}${studyDate}`;
+    }
+
     function parseMappingCsv(text) {
         const rows = parseCsvRows(text);
         if (rows.length === 0) {
@@ -115,8 +149,10 @@
         }
 
         const headers = rows[0].values.map(value => value.trim());
-        if (headers.length !== CSV_HEADERS.length || headers.some((value, index) => value !== CSV_HEADERS[index])) {
-            throw new MappingCsvError(`標題必須正好是 ${CSV_HEADERS.join(',')}`, rows[0].lineNumber);
+        const includesStudyDate = headersMatch(headers, STUDY_DATE_CSV_HEADERS);
+        const isLegacyFormat = headersMatch(headers, LEGACY_CSV_HEADERS);
+        if (!includesStudyDate && !isLegacyFormat) {
+            throw new MappingCsvError(`標題必須正好是 ${STUDY_DATE_CSV_HEADERS.join(',')}（舊版兩欄格式仍相容）`, rows[0].lineNumber);
         }
 
         const mapping = new Map();
@@ -124,12 +160,21 @@
         const warnings = [];
 
         for (const row of rows.slice(1)) {
-            if (row.values.length !== 2) {
-                throw new MappingCsvError('每列必須正好有兩欄', row.lineNumber);
+            const expectedColumnCount = includesStudyDate ? 3 : 2;
+            if (row.values.length !== expectedColumnCount) {
+                throw new MappingCsvError(`每列必須正好有 ${expectedColumnCount} 欄`, row.lineNumber);
             }
 
             const originalPatientId = row.values[0].trim();
-            const newPatientId = row.values[1].trim();
+            let originalStudyDate = '';
+            if (includesStudyDate) {
+                try {
+                    originalStudyDate = normalizeStudyDate(row.values[1]);
+                } catch (error) {
+                    throw new MappingCsvError(error.message, row.lineNumber);
+                }
+            }
+            const newPatientId = row.values[includesStudyDate ? 2 : 1].trim();
 
             if (!originalPatientId) {
                 throw new MappingCsvError('Original_PatientID 不可空白', row.lineNumber);
@@ -141,9 +186,16 @@
                 throw new MappingCsvError('New_PatientID 必須為 1–64 個 ASCII 英數、底線、連字號或句點，且以英數開頭', row.lineNumber);
             }
 
-            if (mapping.has(originalPatientId)) {
-                if (mapping.get(originalPatientId) !== newPatientId) {
-                    throw new MappingCsvError(`同一 Original_PatientID「${originalPatientId}」出現不同代號`, row.lineNumber);
+            const mappingKey = includesStudyDate
+                ? createPatientStudyKey(originalPatientId, originalStudyDate)
+                : originalPatientId;
+            const mappingLabel = includesStudyDate
+                ? `Original_PatientID「${originalPatientId}」與 StudyDate「${originalStudyDate}」`
+                : `Original_PatientID「${originalPatientId}」`;
+
+            if (mapping.has(mappingKey)) {
+                if (mapping.get(mappingKey) !== newPatientId) {
+                    throw new MappingCsvError(`同一 ${mappingLabel} 出現不同代號`, row.lineNumber);
                 }
                 warnings.push(`第 ${row.lineNumber} 列與前面重複，已自動去重`);
                 continue;
@@ -153,7 +205,7 @@
                 throw new MappingCsvError(`New_PatientID「${newPatientId}」已被另一位病人使用`, row.lineNumber);
             }
 
-            mapping.set(originalPatientId, newPatientId);
+            mapping.set(mappingKey, newPatientId);
             aliasOwners.set(newPatientId, originalPatientId);
         }
 
@@ -161,7 +213,7 @@
             throw new MappingCsvError('CSV 沒有任何有效對應資料');
         }
 
-        return { mapping, warnings };
+        return { mapping, warnings, includesStudyDate };
     }
 
     function getTransferSyntaxInfo(transferSyntaxUid) {
@@ -310,9 +362,13 @@
 
     return {
         CSV_HEADERS,
+        LEGACY_CSV_HEADERS,
+        STUDY_DATE_CSV_HEADERS,
         MappingCsvError,
         SAFE_ALIAS_PATTERN,
+        createPatientStudyKey,
         getTransferSyntaxInfo,
+        normalizeStudyDate,
         parseCsvRows,
         parseMappingCsv,
         rewriteDicomStrings

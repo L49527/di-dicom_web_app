@@ -1,4 +1,4 @@
-# DICOM De-ID WebEngine v4
+# DICOM De-ID WebEngine v4.1
 
 DICOM De-ID WebEngine 是一個純前端、逐檔串流的 DICOM 去識別化工具。影像與標籤都在瀏覽器本機處理，不會上傳到伺服器。
 
@@ -29,7 +29,7 @@ Output/
 └── Mapping.csv
 ```
 
-`Mapping.csv` 只記錄已成功寫出的對應，不會把略過或寫入失敗的檔案列為成功。
+`Mapping.csv` 只記錄已成功寫出的對應，並包含 `Original_StudyDate`；不會把日期不符、略過或寫入失敗的檔案列為成功。
 
 ## 處理模式
 
@@ -39,30 +39,33 @@ Output/
 
 ### CSV 指定代號
 
-只處理 CSV 名單內的 PatientID。名單外檔案會略過、不輸出，也不列為 DICOM 錯誤。
+新版 CSV 可同時用 PatientID 與 StudyDate `(0008,0020)` 篩選。只有兩者都相符的 DICOM 才會輸出；名單外或日期不符的檔案會略過，不列為 DICOM 錯誤。
 
 CSV 必須是 UTF-8 或 UTF-8 BOM，且第一列正好為：
 
 ```csv
-Original_PatientID,New_PatientID
+Original_PatientID,Original_StudyDate,New_PatientID
 ```
 
 範例：
 
 ```csv
-Original_PatientID,New_PatientID
-12345678,CASE-A01
-87654321,CASE-A02
+Original_PatientID,Original_StudyDate,New_PatientID
+12345678,2025/12/29,CASE-A01
+87654321,2025-12-30,CASE-A02
 ```
 
 規則：
 
 - Original_PatientID 去除前後空白後，採區分大小寫的完全比對。
+- Original_StudyDate 接受 `YYYY/MM/DD`、`YYYY-MM-DD` 或 DICOM 原生的 `YYYYMMDD`，匯入後統一正規化為八碼日期。
+- 每一列使用 `Original_PatientID + Original_StudyDate` 的組合作為白名單條件；例如同一 PatientID 的其他檢查日期不會輸出。
 - New_PatientID 必須為 1–64 個 ASCII 英數、底線、連字號或句點，且第一字元必須是英數。
-- 同一 Original_PatientID 重複相同對應時會自動去重。
-- 同一 Original_PatientID 指定不同代號，或不同病人共用同一代號時，整份 CSV 會拒絕載入。
+- 同一 PatientID＋StudyDate 重複相同對應時會自動去重；同一組合指定不同代號時會拒絕載入。
+- 同一位病人的不同日期可使用相同或不同代號；不同 PatientID 不可共用同一代號。
 - 支援 LF、CRLF、雙引號、逗號逸出與 UTF-8 BOM。
 - 介面可直接下載只有標題列的 UTF-8 BOM 範本。
+- 舊版 `Original_PatientID,New_PatientID` 兩欄 CSV 仍可匯入，但只會依 PatientID 比對，不會限制 StudyDate。
 
 ## DICOM 改寫方式
 
