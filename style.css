@@ -1,26 +1,3 @@
-/* Tailwind takes care of most things, we just need custom scrollbars */
-
-::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
-}
-
-::-webkit-scrollbar-track {
-    background: transparent;
-}
-
-::-webkit-scrollbar-thumb {
-    background: rgba(0, 0, 0, 0.15);
-    /* Light gray for light theme */
-    border-radius: 10px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-    background: rgba(0, 0, 0, 0.25);
-}
-
-/* Ensure the drop zone feels right */
-.drag-over {
-    border-color: #2563eb !important;
-    background-color: rgba(59, 130, 246, 0.1) !important;
-}
+:root{font:16px/1.55 system-ui,-apple-system,"Microsoft JhengHei",sans-serif;color:#172d42;background:#f0f4f7}
+*{box-sizing:border-box}body{margin:0}header,main{max-width:1320px;margin:auto;padding:22px clamp(16px,3vw,42px)}header,nav,.actions{display:flex;align-items:center;justify-content:space-between;gap:12px}header{border-bottom:1px solid #cbd9e2}header p,p.hint{color:#52687b;font-size:.88rem;margin:.35rem 0}h1{font-size:clamp(1.15rem,2.5vw,1.75rem);margin:0}h1 small,#tagCount{color:#4f697e;font-size:.8rem}h2{font-size:1.1rem;margin:0 0 12px}a{color:#165a8c}main{display:grid;grid-template-columns:minmax(280px,370px) minmax(0,1fr);gap:20px;align-items:start}.panel{background:white;border:1px solid #d2dde4;border-radius:14px;padding:20px}aside.panel{padding:0}aside section{padding:18px;border-bottom:1px solid #e2e9ee}aside section:last-child{border:0}article{display:grid;gap:14px}
+button,summary,label{font:inherit}button{background:white;color:#1b4e75;border:1px solid #b6c8d3;border-radius:8px;padding:7px 12px;cursor:pointer;font-weight:600}button:hover:enabled{background:#eaf4fc}button:disabled{opacity:.55;cursor:default}button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible{outline:3px solid #007cc3;outline-offset:2px}.primary{color:white;background:#135c91;border-color:#135c91;min-height:44px}.primary:hover:enabled{background:#104772}.folder{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:4px;width:100%;margin:6px 0;text-align:left}.folder span{font-size:.85rem;color:#52687b;overflow-wrap:anywhere}.options label,.tag,.exception{display:block;padding:7px 2px;cursor:pointer}input{accent-color:#135c91}.tag small{display:block;margin-left:26px;color:#52687b}.exception,.warn{background:#fff5db;color:#744400;padding:8px;border-radius:6px}.error{color:#932c32;background:#fff0f0;padding:8px;border-radius:6px}#csvPanel,.actions{margin-top:10px}.actions{justify-content:flex-start;flex-wrap:wrap}summary{cursor:pointer;font-weight:650}details>summary{padding:5px 0}dl{display:grid;grid-template-columns:max-content 1fr;gap:4px 16px}dt{color:#52687b}dd{margin:0;overflow-wrap:anywhere}#next{color:#234c67}#stats{display:flex;gap:10px;flex-wrap:wrap}.stat{min-width:115px;padding:10px 14px;border:1px solid #dae5ec;border-radius:8px}.stat strong{display:block;font-size:1.35rem}.stat small{color:#485e70}.scroll{overflow:auto;max-height:330px}table{border-collapse:collapse;font-size:.88rem;width:100%}td,th{text-align:left;border-bottom:1px solid #d9e2e9;padding:7px;overflow-wrap:anywhere}th{background:#f1f6fa;position:sticky;top:0}progress{width:100%;accent-color:#135c91}#log{max-height:260px;overflow:auto;font-family:monospace}#notes p{margin:.65em 0}#results details{margin-top:12px}#results details button{margin-top:8px}[hidden]{display:none!important}@media(max-width:780px){main{grid-template-columns:1fr}header{align-items:flex-start}nav{flex-wrap:wrap}dl{grid-template-columns:1fr}dd{margin-bottom:4px}}

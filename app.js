@@ -1,1047 +1,222 @@
 'use strict';
-
-const Core = window.DicomDeIdCore;
-if (!Core) throw new Error('DicomDeIdCore failed to load.');
-
-let inputHandle = null;
-let outputHandle = null;
-let dicomFilesList = [];
-let isProcessing = false;
-let processingMode = null;
-let importedPatientMapping = new Map();
-let importedCsvWarnings = [];
-let importedCsvName = '';
-let importedCsvIncludesStudyDate = false;
-let patientMapping = new Map();
-let accessionMapping = new Map();
-let mappingLog = [];
-const sequenceNext = new WeakMap();
-
-const btnInput = document.getElementById('btnInput');
-const btnOutput = document.getElementById('btnOutput');
-const labelInput = document.getElementById('labelInput');
-const labelOutput = document.getElementById('labelOutput');
-const startBtn = document.getElementById('startBtn');
-const queueCount = document.getElementById('queueCount');
-const terminal = document.getElementById('terminal');
-const progressContainer = document.getElementById('progressContainer');
-const progressBar = document.getElementById('progressBar');
-const progressPercentage = document.getElementById('progressPercentage');
-const progressStatus = document.getElementById('progressStatus');
-const fsaStatus = document.getElementById('fsaStatus');
-const csvModePanel = document.getElementById('csvModePanel');
-const btnMappingCsv = document.getElementById('btnMappingCsv');
-const mappingCsvInput = document.getElementById('mappingCsvInput');
-const mappingCsvStatus = document.getElementById('mappingCsvStatus');
-const downloadCsvTemplate = document.getElementById('downloadCsvTemplate');
-const btnPrecheck = document.getElementById('btnPrecheck');
-const ignoreDateToggle = document.getElementById('ignoreDateToggle');
-const resultsPanel = document.getElementById('resultsPanel');
-const resultsTitle = document.getElementById('resultsTitle');
-const resultsStats = document.getElementById('resultsStats');
-const resultsNote = document.getElementById('resultsNote');
-const resultsTableWrap = document.getElementById('resultsTableWrap');
-const resultsTableBody = document.getElementById('resultsTableBody');
-const btnDownloadReport = document.getElementById('btnDownloadReport');
-const toastClose = document.getElementById('toastClose');
-let lastReportRows = [];
-let toastTimer = null;
-const modeRadios = Array.from(document.querySelectorAll('input[name="processingMode"]'));
-
-const supportsFSA = 'showDirectoryPicker' in window;
-if (!supportsFSA) {
-    document.getElementById('browserWarning').classList.remove('hidden');
-    fsaStatus.textContent = 'NO';
-    fsaStatus.className = 'font-bold text-rose-500';
-    btnInput.disabled = true;
-    btnOutput.disabled = true;
-}
-
-// ------------------------------------------
-// 1. Tag Configuration Panel
-// ------------------------------------------
-const OPTIONAL_TAGS = [
-    { tag: 'x00100030', name: 'PatientBirthDate (0010,0030)' },
-    { tag: 'x00100040', name: 'PatientSex (0010,0040)' },
-    { tag: 'x00101010', name: 'PatientAge (0010,1010)' },
-    { tag: 'x00101040', name: 'PatientAddress (0010,1040)' },
-    { tag: 'x00102154', name: 'PatientTelephoneNumbers (0010,2154)' },
-    { tag: 'x00080080', name: 'InstitutionName (0008,0080)' },
-    { tag: 'x00080081', name: 'InstitutionAddress (0008,0081)' },
-    { tag: 'x00080090', name: 'ReferringPhysicianName (0008,0090)' },
-    { tag: 'x00081010', name: 'StationName (0008,1010)' },
-    { tag: 'x00081030', name: 'StudyDescription (0008,1030)' },
-    { tag: 'x00081070', name: 'OperatorsName (0008,1070)' }
+const Core = globalThis.DicomDeIdCore;
+const $ = id => document.getElementById(id);
+const roles = {input:'原始 DICOM',images:'研究影像',records:'院內紀錄'};
+const folderHints = {input:'選擇輸入資料夾',images:'選擇影像輸出資料夾',records:'選擇對照表資料夾'};
+const dirs = {input:null,images:null,records:null};
+const optionalTags = [
+    ['00100030','出生日期','PatientBirthDate'],['00100040','性別','PatientSex'],
+    ['00101010','年齡','PatientAge'],['00101040','地址','PatientAddress'],
+    ['00102154','電話','PatientTelephoneNumbers'],['00080080','機構名稱','InstitutionName'],
+    ['00080081','機構地址','InstitutionAddress'],['00080090','轉介醫師','ReferringPhysicianName'],
+    ['00081010','工作站名稱','StationName'],['00081030','檢查描述','StudyDescription'],
+    ['00081070','操作人員','OperatorsName']
 ];
-
-const tagsForm = document.getElementById('optionalTagsForm');
-OPTIONAL_TAGS.forEach(item => {
-    const div = document.createElement('div');
-    div.className = 'flex items-center gap-3 p-2 hover:bg-white rounded-lg transition-colors';
-    div.innerHTML = `
-        <label class="relative flex items-center cursor-pointer">
-            <input type="checkbox" value="${item.tag}" class="tag-checkbox peer h-5 w-5 cursor-pointer appearance-none rounded-md border border-slate-300 checked:border-primary checked:bg-primary transition-all">
-            <span class="absolute text-white opacity-0 peer-checked:opacity-100 top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none">
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"></path></svg>
-            </span>
-        </label>
-        <span class="text-sm text-slate-700 select-none">${item.name}</span>
-    `;
-    tagsForm.appendChild(div);
-});
-
-let allTagsChecked = false;
-document.getElementById('toggleAllTags').addEventListener('click', () => {
-    allTagsChecked = !allTagsChecked;
-    document.querySelectorAll('.tag-checkbox').forEach(checkbox => {
-        checkbox.checked = allTagsChecked;
-    });
-});
-
-function getSelectedTags() {
-    return Array.from(document.querySelectorAll('.tag-checkbox:checked')).map(checkbox => checkbox.value);
+let inputs=[], mode='', imported=null, csvName='', busy=false, matchCsvText='', failureCsvText='';
+const tagBoxes=[];
+function el(tag,text) {const node=document.createElement(tag);if(text!=null) node.textContent=text;return node;}
+for (const [code,title,english] of optionalTags) {
+    const label=el('label'); label.className='tag';
+    const box=el('input'); box.type='checkbox';box.value='x'+code;
+    label.append(box,' '+title,el('small',english+' ('+code.slice(0,4)+','+code.slice(4)+')'));
+    $('tags').append(label);tagBoxes.push(box);
 }
-
-// ------------------------------------------
-// 2. UI Helpers and Mode Selection
-// ------------------------------------------
-function logToTerminal(message, type = 'info') {
-    const div = document.createElement('div');
-    const timeSpan = document.createElement('span');
-    const time = new Date().toLocaleTimeString('en-US', { hour12: false });
-
-    let colorClass = 'text-slate-500';
-    if (type === 'success') colorClass = 'text-emerald-600 font-medium';
-    if (type === 'warning') colorClass = 'text-amber-600 font-medium';
-    if (type === 'error') colorClass = 'text-rose-600 font-medium';
-    if (type === 'system') colorClass = 'text-primary/80 font-medium tracking-wide';
-
-    div.className = colorClass;
-    timeSpan.className = 'opacity-40 font-semibold';
-    timeSpan.textContent = `[${time}]`;
-    div.appendChild(timeSpan);
-    div.appendChild(document.createTextNode(` ${message}`));
-    terminal.appendChild(div);
-    terminal.scrollTop = terminal.scrollHeight;
+function currentTags(){return tagBoxes.filter(b=>b.checked).map(b=>b.value);}
+function log(message){const list=$('log');list.prepend(el('li',new Date().toLocaleTimeString('zh-TW')+' '+message));if(list.children.length>150)list.lastChild.remove();}
+function phase(title,n,total){$('progressPanel').hidden=false;$('phase').textContent=title;$('progress').max=total||1;$('progress').value=n;$('counter').textContent=total?n+' / '+total+' 檔':'';}
+function nextStep() {
+    if (!globalThis.dicomParser) return 'DICOM 解析器載入失敗，請確認 vendor 資料夾與網頁放在一起。';
+    if (!window.showDirectoryPicker || !navigator.locks) return '請使用支援資料夾存取的桌面版 Chrome、Edge 或 Opera 開啟本頁。';
+    if (!dirs.input) return '請選擇原始 DICOM 資料夾。';
+    if (!inputs.length) return '輸入資料夾沒有可掃描的檔案，請重新選擇。';
+    if (!dirs.images) return '請選擇研究影像輸出資料夾。';
+    if (!dirs.records) return '請選擇院內紀錄資料夾。';
+    if (!mode) return '請選擇本批處理模式。';
+    if (mode==='csv' && !imported) return '請匯入有效的研究名單 CSV。';
+    return '';
 }
-
-function showToast(message, type = 'info') {
-    const toast = document.getElementById('toast');
-    const toastIcon = document.getElementById('toastIcon');
-    const toastMsg = document.getElementById('toastMsg');
-
-    toastMsg.textContent = message;
-    const sticky = type === 'error';
-    toast.className = `fixed bottom-6 right-6 max-w-md transform transition-all duration-300 z-50 px-6 py-4 rounded-xl shadow-lg shadow-slate-200 border text-slate-700 bg-white flex items-start gap-3 ${sticky ? 'pointer-events-auto' : 'pointer-events-none'}`;
-    toastClose.classList.toggle('hidden', !sticky);
-
-    if (type === 'success') {
-        toast.classList.add('border-emerald-200');
-        toastIcon.className = 'fas fa-check-circle text-emerald-500 text-xl';
-    } else if (type === 'error') {
-        toast.classList.add('border-rose-200', 'bg-rose-50');
-        toastIcon.className = 'fas fa-triangle-exclamation text-rose-600 text-xl';
-    } else {
-        toast.classList.add('border-blue-200');
-        toastIcon.className = 'fas fa-info-circle text-primary text-xl';
+function dateRule(){
+    if(mode!=='csv')return '全部檢查';
+    if(!imported)return '待匯入 CSV';
+    if(!imported.includesStudyDate)return '僅比對病歷號（兩欄 CSV）';
+    return $('ignore').checked?'允許同一病人其他日期':'病歷號與指定日期均須相符';
+}
+function refresh() {
+    for(const b of document.querySelectorAll('button,input')) b.disabled=busy;
+    const needed=nextStep();
+    $('next').textContent=busy?'作業進行中，請保持分頁開啟。':needed || '設定已備妥，可開始轉換。';
+    $('start').disabled=busy || Boolean(needed);
+    $('precheck').disabled=busy || !inputs.length || !imported || mode!=='csv' || !globalThis.dicomParser;
+    $('csvPanel').hidden=mode!=='csv';
+    $('ignoreLabel').hidden=!imported?.includesStudyDate;
+    $('tagCount').textContent=currentTags().length+' 項';
+    $('allTags').textContent=tagBoxes.every(b=>b.checked)?'全部取消':'全選';
+    const parts=[['輸入',dirs.input?dirs.input.name+' · '+inputs.length+' 個待掃描檔案':'待選擇'],
+        ['處理模式',mode==='auto'?'自動編號':mode==='csv'?'CSV 指定代號':'待選擇'],
+        ['篩選條件',mode?dateRule():'待選擇'],['研究影像',dirs.images?.name || '待選擇'],
+        ['院內紀錄',dirs.records?.name || '待選擇']];
+    $('summary').replaceChildren(...parts.flatMap(([k,v])=>[el('dt',k),el('dd',v)]));
+}
+function invalidate(){$('results').hidden=true;$('progressPanel').hidden=true;refresh();}
+function notice(text){$('resultTitle').textContent='作業未完成';$('stats').replaceChildren();const p=el('p',text);p.className='error';$('notes').replaceChildren(p);$('matches').hidden=true;$('failures').hidden=true;$('results').hidden=false;log(text);}
+async function working(task) {
+    if (busy) return;
+    busy=true;refresh();
+    try{await task();}catch(e){if(e.name!=='AbortError')notice(e.message || String(e));}
+    finally{busy=false;refresh();}
+}
+for(const id of Object.keys(dirs)) $(id).onclick=()=>working(async()=>{
+    const dir=await window.showDirectoryPicker({mode:id==='input'?'read':'readwrite'});
+    const proposed={...dirs,[id]:dir};
+    await Batch.independent(Object.fromEntries(Object.entries(proposed).map(([k,v])=>[roles[k],v])));
+    if(id==='input') {
+        phase('掃描輸入資料夾',0,0);
+        inputs=(await Batch.collect(dir)).sort((a,b)=>a.path<b.path?-1:a.path>b.path?1:0);
     }
-
-    toast.classList.remove('translate-y-24', 'opacity-0');
-    window.clearTimeout(toastTimer);
-    // Errors stay until the user closes them; other messages fade after a few seconds.
-    if (!sticky) toastTimer = window.setTimeout(hideToast, 4000);
+    dirs[id]=dir;$(id).querySelector('span').textContent=dir.name;invalidate();
+});
+for(const radio of document.querySelectorAll('[name=mode]')) radio.onchange=()=>{mode=radio.value;invalidate();};
+$('ignore').onchange=invalidate;
+$('tags').onchange=invalidate;
+$('allTags').onclick=()=>{const checked=!tagBoxes.every(b=>b.checked);for(const box of tagBoxes)box.checked=checked;invalidate();};
+function download(name,content) {
+    const url=URL.createObjectURL(new Blob([content],{type:'text/csv;charset=utf-8'}));
+    const a=el('a');a.href=url;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),2000);
 }
-
-function hideToast() {
-    const toast = document.getElementById('toast');
-    toast.classList.add('translate-y-24', 'opacity-0');
-    toast.classList.remove('pointer-events-auto');
-    toast.classList.add('pointer-events-none');
+$('template').onclick=()=>download('PatientID_StudyDate_Mapping_Template.csv','\uFEFF'+Core.CSV_HEADERS.join(',')+'\r\n');
+$('importCsv').onclick=()=>{$('csvFile').value='';$('csvFile').click();};
+$('csvFile').onchange=()=>working(async()=>{
+    const file=$('csvFile').files[0];if(!file)return;
+    imported=null;csvName='';$('ignore').checked=false;invalidate();$('csvInfo').textContent='正在驗證名單';
+    try {
+        const parsed=Core.parseMappingCsv(new TextDecoder('utf-8',{fatal:true}).decode(await file.arrayBuffer()));
+        Batch.validateOwners([],parsed.mapping,parsed.includesStudyDate);
+        imported=parsed;csvName=file.name;
+        $('csvInfo').textContent=file.name+' · '+parsed.mapping.size+' 列有效對應'+(parsed.warnings.length?' · 已合併 '+parsed.warnings.length+' 列重複資料':'');
+    }catch(e){$('csvInfo').textContent='CSV 匯入失敗';throw e;}
+});
+$('downloadFail').onclick=()=>download('Failure_Report.csv',failureCsvText);
+$('downloadMatch').onclick=()=>download('Unmatched_Report.csv',matchCsvText);
+function table(id,head,rows) {
+    const t=el('table'), h=t.createTHead().insertRow();
+    for(const v of head)h.append(el('th',v));
+    const body=t.createTBody();
+    for(const values of rows.slice(0,200)){const r=body.insertRow();for(const v of values)r.append(el('td',v));}
+    const panel=$(id);panel.replaceChildren(t);
+    if(rows.length>200)panel.append(el('p','顯示前 200 筆，下載 CSV 可查看全部。'));
 }
-
-toastClose.addEventListener('click', hideToast);
-
-// ------------------------------------------
-// Results panel
-// ------------------------------------------
-const CATEGORY_LABELS = {
-    date_ignored: { text: '忽略日期輸出', className: 'bg-blue-100 text-blue-700' },
-    date_mismatch: { text: '日期不符', className: 'bg-rose-100 text-rose-700' },
-    leading_zero: { text: '前導 0 遺失', className: 'bg-amber-100 text-amber-700' },
-    not_found: { text: '找不到 ID', className: 'bg-slate-200 text-slate-700' },
-    not_listed: { text: '不在名單', className: 'bg-slate-100 text-slate-500' }
+function render(title,stats,notes,failed,report,preview) {
+    $('resultTitle').textContent=title;$('stats').replaceChildren(...stats.map(([label,n])=>{
+        const card=el('div');card.className='stat';card.append(el('strong',n),el('small',label));return card;
+    }));
+    $('notes').replaceChildren(...notes.map(([msg,type])=>{const p=el('p',msg);p.className=type||'';return p;}));
+    $('failures').hidden=!failed.length;$('failures').open=Boolean(failed.length);
+    $('failTitle').textContent='查看失敗 '+failed.length+' 檔';if(failed.length)table('failTable',['輸入檔案','分類','原因'],failed);
+    $('matches').hidden=!report.length;$('matches').open=false;
+    if(report.length)table('matchTable',['來源','病歷號','日期','原因'],report.map(r=>[r.source,r.patientId,r.studyDate,r.reason]));
+    $('results').hidden=false;
+    $('phase').textContent=preview?'預檢完成':title;
+}
+function errorReason(e){return e?.message || String(e);}
+async function readInput(item,preview) {
+    let file;
+    try{file=await item.handle.getFile();}catch(e){throw Batch.fileError('讀取失敗',e);}
+    if(preview){
+        try{return {m:await Batch.probe(file)};}catch(e){throw Batch.fileError('無法解析',e);}
+    }
+    let bytes;
+    try{bytes=new Uint8Array(await file.arrayBuffer());}catch(e){throw Batch.fileError('讀取失敗',e);}
+    try{const data=dicomParser.parseDicom(bytes);return {bytes,data,m:Batch.metadata(data)};}
+    catch(e){
+        const part10=bytes.length>=132 && String.fromCharCode(...bytes.subarray(128,132))==='DICM';
+        throw Batch.fileError(part10?'DICOM 解析失敗':'無法辨識 DICOM',e);
+    }
+}
+async function execute(preview) {
+    $('results').hidden=true;phase('檢查本批設定',0,0);
+    const isCsv=mode==='csv', mapping=isCsv?imported.mapping:new Map();
+    const dated=isCsv && imported.includesStudyDate;
+    const allowOther=dated && $('ignore').checked;
+    const match=Core.createCsvMatcher(mapping,dated);
+    let state;
+    if(dirs.images && dirs.records) {
+        state=await Batch.prepare(dirs.images,dirs.records,mapping,dated,(n,total)=>phase('核對既有輸出影像',n,total));
+        if(!preview)await Batch.pair(state);
+    }
+    const exact=new Set(), otherDates=new Map(), combos=new Map(), ambiguous=new Set(), failed=[], notes=[];
+    const counts={written:0,exists:0,skipped:0,candidate:0};
+    const tags=currentTags();
+    const candidateUids=new Set();
+    for(let i=0;i<inputs.length;i++){
+        const item=inputs[i];
+        try {
+            const {bytes,data,m}=await readInput(item,preview);
+            Batch.checkMeta(m);
+            let alias,via,csvDates;
+            const k=Core.createPatientStudyKey(m.origPatientID,m.origStudyDate);
+            if(isCsv){
+                const result=match(m.origPatientID,m.origStudyDate,allowOther);
+                if(!combos.has(k))combos.set(k,{patientId:m.origPatientID,studyDate:m.origStudyDate,fileCount:0,matched:false});
+                const combo=combos.get(k);combo.fileCount++;
+                if(!result?.alias){if(result?.via==='ambiguous')ambiguous.add(k);counts.skipped++;continue;}
+                alias=result.alias;via=result.via;csvDates=result.csvDates;combo.matched=true;
+                if(via==='exact')result.csvKeys.forEach(id=>exact.add(id));
+            }
+            if(preview) {
+                if(state?.objects.has(m.sop))counts.exists++;
+                else if(!candidateUids.has(m.sop)){candidateUids.add(m.sop);counts.candidate++;}
+            } else {
+                const outcome=await Batch.convert(state,bytes,data,m,alias,tags);
+                counts[outcome==='exists'?'exists':'written']++;
+            }
+            if(via==='id_only'){
+                if(!otherDates.has(k))otherDates.set(k,{source:'DICOM',category:'date_ignored',patientId:m.origPatientID,
+                    studyDate:m.origStudyDate,newPatientId:alias,fileCount:0,reason:'僅 ID 相符，'+(preview?'符合放寬日期條件':'已輸出或核對既有檔案')+'，代號 '+alias+'。CSV 指定日期：'+csvDates.join('、')});
+                otherDates.get(k).fileCount++;
+            }
+        }catch(e){failed.push([item.path,e.kind||'DICOM 欄位或內容異常',errorReason(e)]);}
+        finally{if(i%10===0 || i+1===inputs.length)phase(preview?'預檢名單與標頭':'核對及轉換影像',i+1,inputs.length);}
+    }
+    const report=isCsv?[...otherDates.values(),...Core.buildMismatchReport(mapping,dated,combos.values(),exact)]:[];
+    for(const r of report)if(r.source==='DICOM' && ambiguous.has(Core.createPatientStudyKey(r.patientId,r.studyDate)))
+        r.reason+='。此 ID 對應多個研究代號，無法只依 ID 輸出。';
+    const reportHeader=['Source','Category','Original_PatientID','Original_StudyDate','New_PatientID','DICOM_File_Count','Reason'];
+    matchCsvText=Batch.csv(reportHeader,report.map(r=>[r.source,r.category,r.patientId,r.studyDate,r.newPatientId||'',r.source==='DICOM'?r.fileCount:'',r.reason]));
+    failureCsvText=Batch.csv(['Input_Relative_Path','Category','Reason'],failed);
+    let reportErrors=0;
+    if(!preview){
+        const writes=[['Mapping.csv',()=>Batch.saveMapping(state)],['Failure_Report.csv',()=>Batch.save(dirs.records,'Failure_Report.csv',failureCsvText)]];
+        writes.push(['Unmatched_Report.csv',()=>Batch.save(dirs.records,'Unmatched_Report.csv',matchCsvText)]);
+        for(const [name,save] of writes)try{await save();}catch(e){reportErrors++;notes.push([name+' 儲存失敗：'+errorReason(e),'error']);}
+        const emptyCount=[...state.emptySlots.values()].reduce((count,slots)=>count+slots.length,0);
+        if(emptyCount){reportErrors++;notes.push(['影像目錄仍有 '+emptyCount+' 個先前中斷留下的空檔，請核對後再交付。','warn']);}
+        notes.push(['影像位置：'+dirs.images.name+'。院內紀錄位置：'+dirs.records.name+'。']);
+        const selected=optionalTags.filter(([code])=>tags.includes('x'+code)).map(([,title])=>title);
+        notes.push(['本批寫出設定：改寫病歷號、檢查單號及原有姓名。額外清除的欄位（若存在）：'+(selected.join('、')||'無')+'。']);
+        notes.push(['對外分享前仍須核查 Sequence、私有標籤與影像上燒錄的文字。','warn']);
+    } else notes.push(['預檢依標頭與名單比對，實際寫入與內容驗證在轉換時進行。']);
+    const stats=[];
+    if(isCsv){
+        stats.push([dated?'指定日期命中（CSV 列）':'病歷號命中（CSV 列）',exact.size+' / '+mapping.size]);
+        if(dated)stats.push(['僅 ID 相符（病人＋日期組）',otherDates.size]);
+        notes.push(['研究名單：'+csvName+'。'+(mapping.size>exact.size?'仍有 '+(mapping.size-exact.size)+' 列未完全命中。':'全部指定列均已命中。'),mapping.size>exact.size?'warn':'']);
+    }
+    stats.push([preview?'預計新增（檔）':'成功寫出（檔）',preview?counts.candidate:counts.written],
+        [preview?'既有 UID（檔）':'既有內容相同（檔）',counts.exists],['名單略過（檔）',counts.skipped],['失敗（檔）',failed.length]);
+    const title=preview?'名單預檢結果':failed.length||reportErrors?'轉換結束，請檢查失敗項目':'研究代號轉換完成';
+    render(title,stats,notes,failed,report,preview);log(title+' · '+inputs.length+' 個輸入檔案');
+}
+$('precheck').onclick=()=>working(()=>execute(true));
+$('start').onclick=()=>working(()=>navigator.locks.request('dicom-deid-export',{ifAvailable:true},lock=>{
+    if(!lock)throw Error('另一個分頁正在轉換，請等該批完成再執行。');return execute(false);
+}));
+$('reset').onclick=()=>{
+    if(busy)return;
+    for(const id of Object.keys(dirs)){dirs[id]=null;$(id).querySelector('span').textContent=folderHints[id];}
+    inputs=[];mode='';imported=null;csvName='';failureCsvText='';matchCsvText='';
+    for(const b of document.querySelectorAll('input[type=radio],input[type=checkbox]'))b.checked=false;
+    for(const d of document.querySelectorAll('details'))d.open=false;
+    for(const id of ['log','stats','notes','failTable','matchTable'])$(id).replaceChildren();
+    $('csvFile').value='';$('csvInfo').textContent='尚未匯入 CSV';invalidate();
 };
-
-function renderResults({ title, stats, note, rows }) {
-    resultsTitle.lastChild.textContent = title;
-    resultsStats.replaceChildren(...stats.map(stat => {
-        const tones = {
-            good: 'border-emerald-200 bg-emerald-50 text-emerald-700',
-            bad: 'border-rose-200 bg-rose-50 text-rose-700',
-            warn: 'border-amber-200 bg-amber-50 text-amber-700',
-            neutral: 'border-slate-200 bg-slate-50 text-slate-600'
-        };
-        const card = document.createElement('div');
-        card.className = `rounded-xl border px-3 py-2 ${tones[stat.tone] || tones.neutral}`;
-        const value = document.createElement('div');
-        value.className = 'text-xl font-black font-mono';
-        value.textContent = stat.value;
-        const label = document.createElement('div');
-        label.className = 'text-[11px] font-semibold leading-snug';
-        label.textContent = stat.label;
-        card.append(value, label);
-        return card;
-    }));
-    resultsNote.textContent = note || '';
-
-    const problems = (rows || []).filter(row => row.category !== 'not_listed');
-    lastReportRows = rows || [];
-    resultsTableBody.replaceChildren(...problems.slice(0, 200).map(row => {
-        const tr = document.createElement('tr');
-        const badge = CATEGORY_LABELS[row.category];
-        const cells = [
-            null,
-            row.source === 'CSV' ? 'CSV 列' : `DICOM（${row.fileCount} 檔）`,
-            row.patientId,
-            row.studyDate || '（空白）',
-            row.reason
-        ];
-        cells.forEach((text, index) => {
-            const td = document.createElement('td');
-            td.className = index === 4 ? 'px-3 py-2 text-slate-600' : 'px-3 py-2 whitespace-nowrap font-mono text-slate-700';
-            if (index === 0) {
-                const span = document.createElement('span');
-                span.className = `inline-block rounded-md px-2 py-0.5 font-sans font-bold ${badge.className}`;
-                span.textContent = badge.text;
-                td.appendChild(span);
-            } else {
-                td.textContent = text;
-            }
-            tr.appendChild(td);
-        });
-        return tr;
-    }));
-    if (problems.length > 200) {
-        const tr = document.createElement('tr');
-        const td = document.createElement('td');
-        td.colSpan = 5;
-        td.className = 'px-3 py-2 text-slate-500';
-        td.textContent = `…另有 ${problems.length - 200} 筆，請下載問題清單查看`;
-        tr.appendChild(td);
-        resultsTableBody.appendChild(tr);
-    }
-    resultsTableWrap.classList.toggle('hidden', problems.length === 0);
-    btnDownloadReport.classList.toggle('hidden', lastReportRows.length === 0);
-    resultsPanel.classList.remove('hidden');
-}
-
-function buildReportCsv(rows) {
-    let content = 'Source,Category,Original_PatientID,Original_StudyDate,New_PatientID,DICOM_File_Count,Reason\n';
-    rows.forEach(row => {
-        content += [
-            row.source,
-            row.category,
-            row.patientId,
-            row.studyDate,
-            row.newPatientId || '',
-            row.source === 'DICOM' ? row.fileCount : '',
-            row.reason
-        ].map(csvEscape).join(',') + '\n';
-    });
-    return `\uFEFF${content}`;
-}
-
-function recordDateIgnored(target, patientId, studyDate, result) {
-    const key = Core.createPatientStudyKey(patientId, studyDate);
-    if (!target.has(key)) {
-        target.set(key, {
-            source: 'DICOM',
-            category: 'date_ignored',
-            patientId,
-            studyDate,
-            newPatientId: result.alias,
-            fileCount: 0,
-            reason: `日期不符，已依 ID 輸出為 ${result.alias}（CSV 日期：${Array.from(new Set(result.csvDates)).sort().join('、')}）`
-        });
-    }
-    target.get(key).fileCount++;
-}
-
-// When ID-only output is on, explain why some date mismatches were still skipped.
-function annotateAmbiguous(rows) {
-    if (!ignoreDateToggle.checked) return rows;
-    rows.forEach(row => {
-        if (row.source === 'DICOM' && row.category === 'date_mismatch') {
-            row.reason += '。此 ID 在 CSV 有多個 New_PatientID，無法只依 ID 判斷，所以沒有輸出';
-        }
-    });
-    return rows;
-}
-
-function countProblems(rows) {
-    const csvRows = rows.filter(row => row.source === 'CSV');
-    return {
-        dateMismatch: csvRows.filter(row => row.category === 'date_mismatch').length,
-        leadingZero: csvRows.filter(row => row.category === 'leading_zero').length,
-        notFound: csvRows.filter(row => row.category === 'not_found').length
-    };
-}
-
-btnDownloadReport.addEventListener('click', () => {
-    const blob = new Blob([buildReportCsv(lastReportRows)], { type: 'text/csv;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = 'Unmatched_Report.csv';
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 0);
-});
-
-document.getElementById('btnCloseResults').addEventListener('click', () => resultsPanel.classList.add('hidden'));
-
-function setCsvStatus(message, type = 'idle') {
-    const styles = {
-        idle: 'text-slate-500 bg-slate-50 border-slate-200',
-        success: 'text-emerald-700 bg-emerald-50 border-emerald-200',
-        warning: 'text-amber-700 bg-amber-50 border-amber-200',
-        error: 'text-rose-700 bg-rose-50 border-rose-200'
-    };
-    mappingCsvStatus.className = `mt-2 rounded-lg border px-3 py-2 text-xs leading-relaxed ${styles[type]}`;
-    mappingCsvStatus.textContent = message;
-}
-
-function checkReady() {
-    const directoriesReady = Boolean(inputHandle && outputHandle && dicomFilesList.length > 0);
-    const modeReady = processingMode === 'auto' || processingMode === 'csv';
-    const csvReady = processingMode !== 'csv' || importedPatientMapping.size > 0;
-    startBtn.disabled = !(supportsFSA && !isProcessing && directoriesReady && modeReady && csvReady);
-    btnPrecheck.disabled = !(supportsFSA && !isProcessing && inputHandle && dicomFilesList.length > 0
-        && processingMode === 'csv' && importedPatientMapping.size > 0);
-}
-
-function setProcessingControlsDisabled(disabled) {
-    btnInput.disabled = disabled || !supportsFSA;
-    btnOutput.disabled = disabled || !supportsFSA;
-    btnMappingCsv.disabled = disabled;
-    downloadCsvTemplate.disabled = disabled;
-    btnPrecheck.disabled = disabled;
-    ignoreDateToggle.disabled = disabled;
-    modeRadios.forEach(radio => { radio.disabled = disabled; });
-}
-
-modeRadios.forEach(radio => {
-    radio.addEventListener('change', event => {
-        processingMode = event.target.value;
-        csvModePanel.classList.toggle('hidden', processingMode !== 'csv');
-        const label = processingMode === 'csv' ? 'CSV 指定代號（白名單）' : '全部病人自動編號';
-        logToTerminal(`Processing mode selected: ${label}`, 'system');
-        checkReady();
-    });
-});
-
-btnMappingCsv.addEventListener('click', () => {
-    mappingCsvInput.value = '';
-    mappingCsvInput.click();
-});
-
-function applyMappingCsvText(text, fileName) {
-    const result = Core.parseMappingCsv(text);
-    importedPatientMapping = result.mapping;
-    importedCsvWarnings = result.warnings;
-    importedCsvName = fileName;
-    importedCsvIncludesStudyDate = result.includesStudyDate;
-
-    const duplicateText = importedCsvWarnings.length > 0
-        ? `；另有 ${importedCsvWarnings.length} 列重複資料已去重`
-        : '';
-    const matchLabel = importedCsvIncludesStudyDate ? 'ID＋StudyDate' : 'Patient ID（舊版格式）';
-    setCsvStatus(`✓ ${fileName}：${importedPatientMapping.size} 組有效 ${matchLabel} 對應${duplicateText}`, importedCsvWarnings.length ? 'warning' : 'success');
-    logToTerminal(`CSV mapping loaded: ${fileName}, ${importedPatientMapping.size} valid mappings.`, 'success');
-    showToast(`已匯入 ${importedPatientMapping.size} 組 Patient ID 對應`, 'success');
-    checkReady();
-    return { count: importedPatientMapping.size, warnings: importedCsvWarnings.length };
-}
-
-mappingCsvInput.addEventListener('change', async event => {
-    const file = event.target.files && event.target.files[0];
-    if (!file) return;
-
-    importedPatientMapping = new Map();
-    importedCsvWarnings = [];
-    importedCsvName = '';
-    importedCsvIncludesStudyDate = false;
-    setCsvStatus('正在驗證 CSV…', 'idle');
-    checkReady();
-
-    try {
-        const buffer = await file.arrayBuffer();
-        const text = new TextDecoder('utf-8', { fatal: true }).decode(buffer);
-        applyMappingCsvText(text, file.name);
-    } catch (error) {
-        setCsvStatus(`CSV 驗證失敗：${error.message}`, 'error');
-        logToTerminal(`CSV validation failed: ${error.message}`, 'error');
-        showToast('CSV 格式或內容不正確', 'error');
-    }
-
-    checkReady();
-});
-
-downloadCsvTemplate.addEventListener('click', () => {
-    const content = `\uFEFF${Core.CSV_HEADERS.join(',')}\r\n`;
-    const blob = new Blob([content], { type: 'text/csv;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = 'PatientID_StudyDate_Mapping_Template.csv';
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 0);
-});
-
-// ------------------------------------------
-// 3. Directory Selection
-// ------------------------------------------
-btnInput.addEventListener('click', async () => {
-    if (isProcessing) return;
-    try {
-        inputHandle = await window.showDirectoryPicker({ mode: 'read' });
-        labelInput.textContent = inputHandle.name;
-        labelInput.classList.remove('text-slate-400');
-        labelInput.classList.add('text-primary', 'font-bold');
-        logToTerminal(`Input directory selected: ${inputHandle.name}`, 'system');
-        logToTerminal('Scanning directory for DICOM files…', 'info');
-
-        dicomFilesList = [];
-        await scanDirectory(inputHandle, dicomFilesList);
-        queueCount.textContent = `0 / ${dicomFilesList.length}`;
-        logToTerminal(`Scanning complete. Found ${dicomFilesList.length} files.`, 'success');
-        showToast(`已掃描 ${dicomFilesList.length} 個檔案`, 'success');
-        checkReady();
-    } catch (error) {
-        if (error.name !== 'AbortError') showToast('無法讀取輸入資料夾', 'error');
-    }
-});
-
-btnOutput.addEventListener('click', async () => {
-    if (isProcessing) return;
-    try {
-        outputHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
-        const permission = await outputHandle.requestPermission({ mode: 'readwrite' });
-        if (permission !== 'granted') throw new Error('Write permission denied.');
-
-        labelOutput.textContent = outputHandle.name;
-        labelOutput.classList.remove('text-slate-400');
-        labelOutput.classList.add('text-emerald-600', 'font-bold');
-        logToTerminal(`Output directory selected: ${outputHandle.name} (Write Permission Granted)`, 'system');
-        try {
-            const existing = await loadExistingMapping(outputHandle);
-            if (existing.length > 0) {
-                logToTerminal(`輸出資料夾已有 Mapping.csv（${describeExistingMapping(existing)}）：轉換時會跳過這些已完成的檢查，並接續編號。`, 'warning');
-                showToast(`偵測到已完成的 ${existing.length} 筆檢查，重跑時會自動跳過`, 'info');
-            }
-        } catch (error) {
-            logToTerminal(`輸出資料夾的 Mapping.csv 無法讀取：${error.message}。開始轉換時會停止，請改選空資料夾或修正該檔。`, 'error');
-            showToast('輸出資料夾的 Mapping.csv 格式不正確', 'error');
-        }
-        checkReady();
-    } catch (error) {
-        if (error.name !== 'AbortError') showToast('無法取得寫入權限', 'error');
-    }
-});
-
-async function scanDirectory(dirHandle, fileList) {
-    for await (const entry of dirHandle.values()) {
-        if (entry.kind === 'file') {
-            if (!entry.name.startsWith('.') && entry.name !== 'DICOMDIR') fileList.push(entry);
-        } else if (entry.kind === 'directory') {
-            await scanDirectory(entry, fileList);
-        }
-    }
-}
-
-// ------------------------------------------
-// 4. DICOM Streaming and Rewriting
-// ------------------------------------------
-function getSequenceId(originalId, prefix, mapping) {
-    if (!mapping.has(originalId)) {
-        const next = sequenceNext.get(mapping) || 1;
-        mapping.set(originalId, `${prefix}${next}`);
-        sequenceNext.set(mapping, next + 1);
-    }
-    return mapping.get(originalId);
-}
-
-function resetSequence(mapping, next = 1) {
-    mapping.clear();
-    sequenceNext.set(mapping, next);
-}
-
-// Reads Mapping.csv left in the output folder by an earlier run. Returns [] when there is none.
-async function loadExistingMapping(dirHandle) {
-    let fileHandle;
-    try {
-        fileHandle = await dirHandle.getFileHandle('Mapping.csv');
-    } catch (error) {
-        if (error.name === 'NotFoundError' || error.name === 'TypeMismatchError') return [];
-        throw error;
-    }
-    const file = await fileHandle.getFile();
-    const text = new TextDecoder('utf-8', { fatal: true }).decode(await file.arrayBuffer());
-    return Core.parseExistingMapping(text);
-}
-
-function describeExistingMapping(rows) {
-    const patients = new Set(rows.map(row => row.origPatientID)).size;
-    return `${patients} 位病人、${rows.length} 筆檢查`;
-}
-
-async function getNestedDirectoryHandle(rootHandle, pathParts) {
-    let currentHandle = rootHandle;
-    for (const part of pathParts) currentHandle = await currentHandle.getDirectoryHandle(part, { create: true });
-    return currentHandle;
-}
-
-function csvEscape(value) {
-    const raw = String(value ?? '');
-    const safe = /^[=+\-@]/.test(raw) ? `'${raw}` : raw;
-    return `"${safe.replace(/"/g, '""')}"`;
-}
-
-function createMappingKey(patientId, accessionNo) {
-    return `${patientId}\u001F${accessionNo}`;
-}
-
-function getSafeModalityPrefix(modality) {
-    return (modality || 'IMG').trim().replace(/[^A-Za-z0-9_-]/g, '') || 'IMG';
-}
-
-function cleanDicomString(value) {
-    return String(value ?? '').replace(/\0/g, '').trim();
-}
-
-function clearOptionalTags(byteArray, dataSet, tagsToClear) {
-    const result = new Uint8Array(byteArray);
-    tagsToClear.forEach(tag => {
-        const element = dataSet.elements[tag];
-        if (!element) return;
-        if (!Number.isInteger(element.dataOffset) || !Number.isInteger(element.length) || element.dataOffset + element.length > result.length) {
-            throw new Error(`Optional tag ${tag} has an invalid byte range`);
-        }
-        result.fill(0x20, element.dataOffset, element.dataOffset + element.length);
-    });
-    return result;
-}
-
-function verifyRewrittenDicom(byteArray, expected, originalElements) {
-    let verifiedDataSet;
-    try {
-        verifiedDataSet = dicomParser.parseDicom(byteArray);
-    } catch (error) {
-        throw new Error('重寫後的 DICOM 無法重新解析');
-    }
-
-    if (cleanDicomString(verifiedDataSet.string('x00100020')) !== expected.patientId) {
-        throw new Error('重寫後 PatientID 驗證失敗');
-    }
-    if (originalElements.x00100010 && cleanDicomString(verifiedDataSet.string('x00100010')) !== expected.patientId) {
-        throw new Error('重寫後 PatientName 驗證失敗');
-    }
-    if (cleanDicomString(verifiedDataSet.string('x00080050')) !== expected.accessionNo) {
-        throw new Error('重寫後 AccessionNumber 驗證失敗');
-    }
-}
-
-function updateProgress(processedCount, totalFiles) {
-    const percentage = totalFiles === 0 ? '0.0' : ((processedCount / totalFiles) * 100).toFixed(1);
-    progressBar.style.width = `${percentage}%`;
-    progressPercentage.textContent = `${percentage}%`;
-    queueCount.textContent = `${processedCount} / ${totalFiles}`;
-}
-
-function renderFsaStatusMarkup() {
-    const statusClass = supportsFSA ? 'text-emerald-500' : 'text-rose-500';
-    const statusText = supportsFSA ? 'YES' : 'NO';
-    return `<div class="text-slate-400">[System] Native File System API Supported: <span class="font-bold ${statusClass}">${statusText}</span></div>`;
-}
-
-const HEADER_PROBE_BYTES = 256 * 1024;
-
-async function readPatientAndStudyDate(fileHandle) {
-    const file = await fileHandle.getFile();
-    const parse = bytes => {
-        const dataSet = dicomParser.parseDicom(bytes, { untilTag: 'x00100020' });
-        return {
-            patientId: cleanDicomString(dataSet.string('x00100020')),
-            studyDate: cleanDicomString(dataSet.string('x00080020')),
-            accession: cleanDicomString(dataSet.string('x00080050'))
-        };
-    };
-    // Only the start of the file is needed; fall back to the whole file if the header is larger.
-    if (file.size > HEADER_PROBE_BYTES) {
-        try {
-            const head = parse(new Uint8Array(await file.slice(0, HEADER_PROBE_BYTES).arrayBuffer()));
-            if (head.patientId) return head;
-        } catch (_) {
-            // Retry with the full file below.
-        }
-    }
-    return parse(new Uint8Array(await file.arrayBuffer()));
-}
-
-btnPrecheck.addEventListener('click', async () => {
-    if (isProcessing || btnPrecheck.disabled) return;
-    isProcessing = true;
-    setProcessingControlsDisabled(true);
-    startBtn.disabled = true;
-    const originalLabel = btnPrecheck.innerHTML;
-    btnPrecheck.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>預檢中…';
-    progressContainer.classList.remove('hidden');
-    progressBar.style.width = '0%';
-    progressPercentage.textContent = '0.0%';
-    progressStatus.textContent = '預檢比對中（只讀取標頭，不寫入檔案）…';
-    logToTerminal(`預檢開始：${dicomFilesList.length} 個檔案 vs CSV ${importedPatientMapping.size} 組對應`, 'system');
-
-    let doneStudyKeys = new Set();
-    if (outputHandle) {
-        try {
-            doneStudyKeys = new Set((await loadExistingMapping(outputHandle))
-                .map(row => createMappingKey(row.origPatientID, row.origAccessionNo)));
-        } catch (error) {
-            logToTerminal(`輸出資料夾的 Mapping.csv 無法讀取：${error.message}`, 'error');
-        }
-    }
-    const combos = new Map();
-    const matchCsv = Core.createCsvMatcher(importedPatientMapping, importedCsvIncludesStudyDate);
-    const allowIdOnly = ignoreDateToggle.checked;
-    const extraMatchedKeys = new Set();
-    const dateIgnored = new Map();
-    let unreadable = 0;
-    let matchedFiles = 0;
-    let doneFiles = 0;
-    const total = dicomFilesList.length;
-
-    for (let index = 0; index < total; index++) {
-        try {
-            const { patientId, studyDate, accession } = await readPatientAndStudyDate(dicomFilesList[index]);
-            if (!patientId) throw new Error('Missing PatientID');
-            const comboKey = Core.createPatientStudyKey(patientId, studyDate);
-            if (!combos.has(comboKey)) combos.set(comboKey, { patientId, studyDate, fileCount: 0, matched: false });
-            const combo = combos.get(comboKey);
-            combo.fileCount++;
-            const result = matchCsv(patientId, studyDate, allowIdOnly);
-            const usable = result && result.alias;
-            if (usable) result.csvKeys.forEach(key => extraMatchedKeys.add(key));
-            if (doneStudyKeys.has(createMappingKey(patientId, accession))) {
-                combo.matched = true;
-                doneFiles++;
-            } else if (usable) {
-                combo.matched = true;
-                matchedFiles++;
-                if (result.via === 'id_only') recordDateIgnored(dateIgnored, patientId, studyDate, result);
-            }
-        } catch (_) {
-            unreadable++;
-        }
-        if ((index + 1) % 20 === 0 || index === total - 1) updateProgress(index + 1, total);
-    }
-
-    const rows = annotateAmbiguous([
-        ...dateIgnored.values(),
-        ...Core.buildMismatchReport(importedPatientMapping, importedCsvIncludesStudyDate, combos.values(), extraMatchedKeys)
-    ]);
-    const counts = countProblems(rows);
-    const ignoredFiles = Array.from(dateIgnored.values()).reduce((sum, row) => sum + row.fileCount, 0);
-    const matchedCsvRows = importedPatientMapping.size - rows.filter(row => row.source === 'CSV').length;
-    const problemTotal = counts.dateMismatch + counts.leadingZero + counts.notFound;
-
-    renderResults({
-        title: '預檢結果（尚未轉換）',
-        stats: [
-            { label: `CSV 可對上（共 ${importedPatientMapping.size} 列）`, value: matchedCsvRows, tone: matchedCsvRows === importedPatientMapping.size ? 'good' : 'neutral' },
-            { label: '日期不符', value: counts.dateMismatch, tone: counts.dateMismatch ? 'bad' : 'good' },
-            { label: '前導 0 遺失', value: counts.leadingZero, tone: counts.leadingZero ? 'warn' : 'good' },
-            { label: '資料夾找不到 ID', value: counts.notFound, tone: counts.notFound ? 'warn' : 'good' }
-        ],
-        note: `將輸出 ${matchedFiles} 個檔案${ignoredFiles ? `（其中 ${ignoredFiles} 個是忽略日期、只依 ID 輸出，請確認下表）` : ''}；${doneFiles ? `${doneFiles} 個檔案先前已完成會跳過；` : ''}${total - matchedFiles - doneFiles - unreadable} 個檔案不在名單會略過${unreadable ? `；${unreadable} 個檔案無法讀取（可能不是 DICOM）` : ''}。`
-            + (problemTotal ? ' 建議先修正 CSV 後重新匯入，再開始轉換。' : ' CSV 全部對上，可以開始轉換。'),
-        rows
-    });
-    progressStatus.textContent = `預檢完成｜可對上 ${matchedCsvRows}/${importedPatientMapping.size} 列`;
-    logToTerminal(`預檢完成：可對上 ${matchedCsvRows}/${importedPatientMapping.size} 列，日期不符 ${counts.dateMismatch}、前導 0 遺失 ${counts.leadingZero}、找不到 ID ${counts.notFound}`, problemTotal ? 'warning' : 'success');
-    showToast(problemTotal ? `預檢發現 ${problemTotal} 列 CSV 沒對上，請看結果表` : '預檢通過，CSV 全部對上', problemTotal ? 'error' : 'success');
-
-    btnPrecheck.innerHTML = originalLabel;
-    isProcessing = false;
-    setProcessingControlsDisabled(false);
-    checkReady();
-});
-
-startBtn.addEventListener('click', async () => {
-    if (isProcessing || startBtn.disabled || dicomFilesList.length === 0) return;
-    if (processingMode === 'csv' && importedPatientMapping.size === 0) {
-        showToast('請先匯入有效的 Patient ID CSV', 'error');
-        return;
-    }
-
-    isProcessing = true;
-    startBtn.disabled = true;
-    setProcessingControlsDisabled(true);
-    startBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i><span>轉換中…</span>';
-    progressContainer.classList.remove('hidden');
-    progressStatus.textContent = '正在向硬碟串流寫入…';
-    resultsPanel.classList.add('hidden');
-
-    let existingRows;
-    try {
-        existingRows = await loadExistingMapping(outputHandle);
-    } catch (error) {
-        logToTerminal(`無法讀取輸出資料夾既有的 Mapping.csv：${error.message}`, 'error');
-        showToast('輸出資料夾的 Mapping.csv 無法讀取，已停止。請改選空資料夾或修正該檔。', 'error');
-        progressStatus.textContent = '已停止：既有 Mapping.csv 無法讀取';
-        isProcessing = false;
-        startBtn.innerHTML = '<i class="fas fa-play"></i><span>開始串流轉換</span>';
-        setProcessingControlsDisabled(false);
-        checkReady();
-        return;
-    }
-
-    resetSequence(patientMapping, Core.nextSequenceNumber(existingRows.map(row => row.newPatientID)));
-    resetSequence(accessionMapping, Core.nextSequenceNumber(existingRows.map(row => row.newAccessionNo)));
-    mappingLog = existingRows.slice();
-    const doneStudyKeys = new Set();
-    existingRows.forEach(row => {
-        doneStudyKeys.add(createMappingKey(row.origPatientID, row.origAccessionNo));
-        if (!patientMapping.has(row.origPatientID)) patientMapping.set(row.origPatientID, row.newPatientID);
-        accessionMapping.set(createMappingKey(row.origPatientID, row.origAccessionNo), row.newAccessionNo);
-    });
-    if (existingRows.length > 0) {
-        logToTerminal(`沿用既有 Mapping.csv（${describeExistingMapping(existingRows)}），已完成的檢查會跳過。`, 'system');
-    }
-
-    let processedCount = 0;
-    let alreadyDoneCount = 0;
-    let successCount = 0;
-    let skippedCount = 0;
-    let errorCount = 0;
-    let mappingWriteFailed = false;
-    const totalFiles = dicomFilesList.length;
-    const tagsToClear = getSelectedTags();
-    const mappingKeys = new Set(existingRows.map(row => createMappingKey(
-        createMappingKey(row.origPatientID, row.origStudyDate),
-        row.origAccessionNo
-    )));
-    const studyFileCounts = new Map();
-    const seenCsvMappingKeys = new Set();
-    const dicomCombos = new Map();
-    const dateIgnoredRows = new Map();
-    const matchCsv = Core.createCsvMatcher(importedPatientMapping, importedCsvIncludesStudyDate);
-    const allowIdOnly = processingMode === 'csv' && ignoreDateToggle.checked;
-    const modeLabel = processingMode === 'csv'
-        ? `CSV whitelist (${importedCsvName}, ${importedPatientMapping.size} patients)`
-        : 'automatic numbering';
-
-    logToTerminal(`Started Streaming Engine. Mode: ${modeLabel}. Targets: ${totalFiles} files.`, 'system');
-    if (allowIdOnly) logToTerminal('已開啟「日期不符時仍依 Patient ID 輸出」。', 'warning');
-
-    for (let index = 0; index < totalFiles; index++) {
-        const fileHandle = dicomFilesList[index];
-
-        try {
-            const file = await fileHandle.getFile();
-            const byteArray = new Uint8Array(await file.arrayBuffer());
-            let dataSet;
-            try {
-                dataSet = dicomParser.parseDicom(byteArray);
-            } catch (error) {
-                throw new Error('Not a valid DICOM file');
-            }
-
-            const patientIdElement = dataSet.elements.x00100020;
-            const accessionElement = dataSet.elements.x00080050;
-            const cleanOriginalPatientId = cleanDicomString(dataSet.string('x00100020'));
-            const cleanOriginalAccession = cleanDicomString(dataSet.string('x00080050'));
-            const cleanOriginalStudyDate = cleanDicomString(dataSet.string('x00080020'));
-            const modality = cleanDicomString(dataSet.string('x00080060')) || 'UNK';
-            const transferSyntaxUid = cleanDicomString(dataSet.string('x00020010'));
-
-            if (!patientIdElement || !cleanOriginalPatientId) throw new Error('Missing PatientID (0010,0020)');
-            if (!accessionElement || !cleanOriginalAccession) throw new Error('Missing AccessionNumber (0008,0050)');
-
-            const isDone = doneStudyKeys.has(createMappingKey(cleanOriginalPatientId, cleanOriginalAccession));
-            let newPatientId;
-            if (processingMode === 'csv') {
-                const matchResult = matchCsv(cleanOriginalPatientId, cleanOriginalStudyDate, allowIdOnly);
-                const usable = Boolean(matchResult && matchResult.alias);
-                const comboKey = Core.createPatientStudyKey(cleanOriginalPatientId, cleanOriginalStudyDate);
-                if (!dicomCombos.has(comboKey)) {
-                    dicomCombos.set(comboKey, {
-                        patientId: cleanOriginalPatientId,
-                        studyDate: cleanOriginalStudyDate,
-                        fileCount: 0,
-                        matched: false
-                    });
-                }
-                const combo = dicomCombos.get(comboKey);
-                combo.fileCount++;
-                if (usable) matchResult.csvKeys.forEach(key => seenCsvMappingKeys.add(key));
-                if (isDone) {
-                    combo.matched = true;
-                    alreadyDoneCount++;
-                    continue;
-                }
-                if (!usable) {
-                    skippedCount++;
-                    continue;
-                }
-                combo.matched = true;
-                if (matchResult.via === 'id_only') {
-                    recordDateIgnored(dateIgnoredRows, cleanOriginalPatientId, cleanOriginalStudyDate, matchResult);
-                }
-                newPatientId = matchResult.alias;
-            } else {
-                if (isDone) {
-                    alreadyDoneCount++;
-                    continue;
-                }
-                newPatientId = getSequenceId(cleanOriginalPatientId, '', patientMapping);
-            }
-
-            const accessionKey = createMappingKey(cleanOriginalPatientId, cleanOriginalAccession);
-            const newAccessionNo = getSequenceId(accessionKey, '', accessionMapping);
-            const clearedByteArray = clearOptionalTags(byteArray, dataSet, tagsToClear);
-            const replacements = {
-                x00100020: newPatientId,
-                x00080050: newAccessionNo
-            };
-            if (dataSet.elements.x00100010) replacements.x00100010 = newPatientId;
-
-            const rewrittenByteArray = Core.rewriteDicomStrings(
-                clearedByteArray,
-                dataSet,
-                replacements,
-                transferSyntaxUid
-            );
-            verifyRewrittenDicom(
-                rewrittenByteArray,
-                { patientId: newPatientId, accessionNo: newAccessionNo },
-                dataSet.elements
-            );
-
-            const studyFileKey = createMappingKey(newPatientId, newAccessionNo);
-            const nextFileNumber = (studyFileCounts.get(studyFileKey) || 0) + 1;
-            const outputDirHandle = await getNestedDirectoryHandle(outputHandle, [newPatientId, newAccessionNo]);
-            const outputFileName = `${getSafeModalityPrefix(modality)}_${String(nextFileNumber).padStart(6, '0')}.dcm`;
-            const outputFileHandle = await outputDirHandle.getFileHandle(outputFileName, { create: true });
-            const writable = await outputFileHandle.createWritable();
-
-            try {
-                await writable.write(rewrittenByteArray);
-                await writable.close();
-            } catch (error) {
-                try {
-                    if (typeof writable.abort === 'function') await writable.abort();
-                } catch (_) {
-                    // Report the original write error.
-                }
-                throw error;
-            }
-
-            studyFileCounts.set(studyFileKey, nextFileNumber);
-            successCount++;
-
-            const mappingKey = createMappingKey(
-                createMappingKey(cleanOriginalPatientId, cleanOriginalStudyDate),
-                cleanOriginalAccession
-            );
-            if (!mappingKeys.has(mappingKey)) {
-                mappingKeys.add(mappingKey);
-                mappingLog.push({
-                    modality,
-                    origPatientID: cleanOriginalPatientId,
-                    origStudyDate: cleanOriginalStudyDate,
-                    newPatientID: newPatientId,
-                    origAccessionNo: cleanOriginalAccession,
-                    newAccessionNo
-                });
-            }
-
-            if (index % 50 === 0 || index === totalFiles - 1) {
-                logToTerminal(`Streamed file ${index + 1} [${modality}] => ${newPatientId}/${newAccessionNo}/${outputFileName}`, 'success');
-            }
-        } catch (error) {
-            errorCount++;
-            logToTerminal(`Error on file ${index + 1}（${fileHandle.name}）: ${error.message}`, 'error');
-        } finally {
-            processedCount++;
-            if (processedCount % 10 === 0 || processedCount === totalFiles) updateProgress(processedCount, totalFiles);
-        }
-    }
-
-    progressStatus.textContent = '正在寫入 Mapping.csv…';
-    logToTerminal('Generating Mapping.csv at output root…', 'system');
-
-    try {
-        let csvContent = 'Modality,Original_PatientID,Original_StudyDate,New_PatientID,Original_AccessionNo,New_AccessionNo\n';
-        mappingLog.forEach(row => {
-            csvContent += [
-                row.modality,
-                row.origPatientID,
-                row.origStudyDate,
-                row.newPatientID,
-                row.origAccessionNo,
-                row.newAccessionNo
-            ].map(csvEscape).join(',') + '\n';
-        });
-
-        const csvFileHandle = await outputHandle.getFileHandle('Mapping.csv', { create: true });
-        const csvWritable = await csvFileHandle.createWritable();
-        await csvWritable.write(`\uFEFF${csvContent}`);
-        await csvWritable.close();
-        logToTerminal(`Mapping.csv saved with ${mappingLog.length} mapping rows (${existingRows.length} from earlier runs).`, 'success');
-    } catch (error) {
-        mappingWriteFailed = true;
-        logToTerminal(`Failed to save Mapping.csv: ${error.message}`, 'error');
-    }
-
-    let mismatchSummary = '';
-    let reportRows = [];
-    if (processingMode === 'csv') {
-        ({ summary: mismatchSummary, rows: reportRows } = await writeMismatchReport(dicomCombos, seenCsvMappingKeys, dateIgnoredRows));
-    }
-
-    const csvNotFoundCount = processingMode === 'csv'
-        ? importedPatientMapping.size - seenCsvMappingKeys.size
-        : 0;
-    const csvMissingLabel = importedCsvIncludesStudyDate ? 'CSV 未找到 ID＋日期' : 'CSV 未找到 ID';
-    const doneLabel = alreadyDoneCount ? `、先前已完成略過 ${alreadyDoneCount} 檔` : '';
-    const summary = processingMode === 'csv'
-        ? `成功 ${successCount} 檔${doneLabel}、不在 CSV 名單略過 ${skippedCount} 檔、DICOM 錯誤 ${errorCount} 檔、${csvMissingLabel} ${csvNotFoundCount} 列${mismatchSummary}`
-        : `成功 ${successCount} 檔${doneLabel}、DICOM 錯誤 ${errorCount} 檔`;
-    progressStatus.textContent = mappingWriteFailed ? `影像處理完成，但 Mapping.csv 寫入失敗｜${summary}` : `全部完成｜${summary}`;
-    logToTerminal(`Stream Processing Complete! ${summary}${mappingWriteFailed ? '；Mapping.csv write failed' : ''}.`, 'system');
-    const counts = countProblems(reportRows);
-    const stats = [
-        { label: '成功輸出（檔）', value: successCount, tone: successCount ? 'good' : 'neutral' },
-        { label: 'DICOM 錯誤（檔）', value: errorCount, tone: errorCount ? 'bad' : 'good' }
-    ];
-    if (alreadyDoneCount) stats.splice(1, 0, { label: '先前已完成略過（檔）', value: alreadyDoneCount, tone: 'neutral' });
-    if (processingMode === 'csv') {
-        stats.splice(1, 0, { label: '不在名單略過（檔）', value: skippedCount, tone: 'neutral' });
-        stats.push({ label: 'CSV 沒對上（列）', value: csvNotFoundCount, tone: csvNotFoundCount ? 'bad' : 'good' });
-    }
-    const noteParts = [];
-    const ignoredFiles = reportRows.filter(row => row.category === 'date_ignored').reduce((sum, row) => sum + row.fileCount, 0);
-    if (ignoredFiles) noteParts.push(`忽略日期、只依 ID 輸出 ${ignoredFiles} 檔`);
-    if (counts.dateMismatch) noteParts.push(`日期不符 ${counts.dateMismatch} 列`);
-    if (counts.leadingZero) noteParts.push(`疑似前導 0 遺失 ${counts.leadingZero} 列`);
-    if (counts.notFound) noteParts.push(`資料夾找不到 ID ${counts.notFound} 列`);
-    renderResults({
-        title: mappingWriteFailed ? '轉換結果（Mapping.csv 寫入失敗）' : '轉換結果',
-        stats,
-        note: (noteParts.length ? `需要注意：${noteParts.join('、')}。下表列出每一筆。` : '')
-            + (errorCount ? ' DICOM 錯誤的檔名請看下方 log。' : ''),
-        rows: reportRows
-    });
-
-    const completedWithErrors = mappingWriteFailed || errorCount > 0;
-    showToast(completedWithErrors ? `轉換完成，請檢查錯誤紀錄：${summary}` : `去識別化完成：${summary}`, completedWithErrors ? 'error' : 'success');
-
-    isProcessing = false;
-    startBtn.innerHTML = '<i class="fas fa-play"></i><span>開始串流轉換</span>';
-    setProcessingControlsDisabled(false);
-    checkReady();
-});
-
-async function writeMismatchReport(dicomCombos, matchedCsvKeys, dateIgnoredRows) {
-    const rows = annotateAmbiguous([
-        ...dateIgnoredRows.values(),
-        ...Core.buildMismatchReport(
-            importedPatientMapping,
-            importedCsvIncludesStudyDate,
-            dicomCombos.values(),
-            matchedCsvKeys
-        )
-    ]);
-    const problems = rows.filter(row => row.category !== 'not_listed');
-    const dateMismatch = rows.filter(row => row.category === 'date_mismatch' && row.source === 'CSV').length;
-    const leadingZero = rows.filter(row => row.category === 'leading_zero' && row.source === 'CSV').length;
-
-    if (problems.length > 0) {
-        logToTerminal(`CSV 對應問題 ${problems.length} 筆（完整清單見 Unmatched_Report.csv）：`, 'error');
-        problems.slice(0, 30).forEach(row => {
-            const datePart = row.studyDate ? ` StudyDate ${row.studyDate}` : '';
-            const filePart = row.source === 'DICOM' ? `（${row.fileCount} 檔）` : `（CSV 代號 ${row.newPatientId}）`;
-            logToTerminal(`[${row.source}] ID ${row.patientId}${datePart}${filePart}：${row.reason}`, 'error');
-        });
-        if (problems.length > 30) logToTerminal(`…其餘 ${problems.length - 30} 筆請看 Unmatched_Report.csv`, 'error');
-    }
-
-    // Always overwrite, so a report from an earlier run never looks current.
-    {
-        try {
-            const handle = await outputHandle.getFileHandle('Unmatched_Report.csv', { create: true });
-            const writable = await handle.createWritable();
-            await writable.write(buildReportCsv(rows));
-            await writable.close();
-            logToTerminal(`Unmatched_Report.csv saved with ${rows.length} rows.`, 'success');
-        } catch (error) {
-            logToTerminal(`Failed to save Unmatched_Report.csv: ${error.message}`, 'error');
-        }
-    }
-
-    const parts = [];
-    if (dateMismatch > 0) parts.push(`其中日期不符 ${dateMismatch} 列`);
-    if (leadingZero > 0) parts.push(`疑似前導 0 遺失 ${leadingZero} 列`);
-    return { rows, summary: parts.length > 0 ? `（${parts.join('、')}，詳見 Unmatched_Report.csv）` : '' };
-}
-
-function resetApp() {
-    if (isProcessing) {
-        showToast('處理中無法重設', 'error');
-        return;
-    }
-
-    inputHandle = null;
-    outputHandle = null;
-    dicomFilesList = [];
-    processingMode = null;
-    importedPatientMapping = new Map();
-    importedCsvWarnings = [];
-    importedCsvName = '';
-    importedCsvIncludesStudyDate = false;
-    resetSequence(patientMapping);
-    resetSequence(accessionMapping);
-    mappingLog = [];
-
-    modeRadios.forEach(radio => { radio.checked = false; });
-    csvModePanel.classList.add('hidden');
-    mappingCsvInput.value = '';
-    setCsvStatus('尚未匯入 CSV', 'idle');
-
-    labelInput.textContent = '未選擇';
-    labelInput.className = 'text-xs font-mono text-slate-400 font-normal';
-    labelOutput.textContent = '未選擇';
-    labelOutput.className = 'text-xs font-mono text-slate-400 font-normal';
-    queueCount.textContent = '0 / 0';
-    terminal.innerHTML = `
-        <div class="text-slate-400">[System] Memory-Safe FileStream Engine Initialized.</div>
-        ${renderFsaStatusMarkup()}
-        <div class="text-slate-400">[System] Waiting for folder permissions and processing mode…</div>
-    `;
-    progressContainer.classList.add('hidden');
-    progressBar.style.width = '0%';
-    progressPercentage.textContent = '0.0%';
-    progressStatus.textContent = '準備串流…';
-    resultsPanel.classList.add('hidden');
-    lastReportRows = [];
-    startBtn.disabled = true;
-    btnPrecheck.disabled = true;
-    showToast('系統狀態已重設', 'info');
-}
-
-window.resetApp = resetApp;
-window.applyMappingCsvText = applyMappingCsvText;
-checkReady();
+refresh();

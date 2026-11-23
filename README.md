@@ -1,62 +1,21 @@
-# DICOM De-ID WebEngine v4.1
+# DICOM 研究代號轉換 v4.2
 
-DICOM De-ID WebEngine 是一個純前端、逐檔串流的 DICOM 去識別化工具。影像與標籤都在瀏覽器本機處理，不會上傳到伺服器。
+使用桌面版 Chrome、Edge 或 Opera 開啟解壓縮後的 `index.html`。網頁、樣式及 DICOM 解析器隨包提供，可離線使用。瀏覽器需要支援資料夾選取、寫入與 Web Locks。
 
-## 瀏覽器需求
+## 執行一批影像
 
-- 桌面版 Google Chrome、Microsoft Edge 或 Opera
-- 瀏覽器必須支援 File System Access API
-- 頁面會從 CDN 載入 Tailwind CSS、Font Awesome 與 dicomParser，因此首次開啟時需要網路；DICOM 內容本身不會送往 CDN
+1. 選取三個彼此獨立的資料夾。原始 DICOM 供讀取，研究影像存放改寫後的檔案，院內紀錄存放原始病歷號、檢查日期與研究代號對照。三者可放在同一個上層目錄之下。
+2. 選擇全部病人自動編號，或匯入 CSV 指定研究代號。CSV 模式可先預檢，確認指定日期命中的列數，以及放寬日期後額外納入的病人與日期。預檢只讀取標頭。
+3. 選擇要額外清除的欄位。按「開始轉換」後，程式逐檔驗證及寫入。結果分列成功寫出、既有內容相同、名單略過與失敗。可展開失敗清單查看來源相對路徑、分類與原因。
+4. 研究影像位於 `研究影像/研究代號/新檢查單號/CT_000001.dcm` 等路徑。院內紀錄包含 `Mapping.csv`、`StudyIndex.json`、`Unmatched_Report.csv`、`Failure_Report.csv`。後兩份報表反映最近一次執行，下載的明細可能含原始識別資料。
 
-直接開啟 `index.html` 即可使用，不需要安裝 Python 或啟動伺服器。
+## 續跑與舊版資料
 
-## 使用流程
+續跑時選取相同的研究影像與院內紀錄資料夾。兩邊的隱藏檔 `.dicom-batch-id` 用來核對配對。新檢查會先把編號保存在院內的 `StudyIndex.json`，第一個影像寫入失敗時仍可找回這個編號。請將它與歷史對照表一起保存。
 
-1. 選擇包含 DICOM 的輸入資料夾。
-2. 選擇不同的輸出資料夾並授權寫入。
-3. 每次執行都必須選擇一種處理模式。
-4. 視需要勾選要清空的其他敏感標籤。
-5. 按下「開始串流轉換」。
+每次開始時會讀取既有輸出標頭。轉換時按 Study Instance UID 辨識檢查、按 SOP Instance UID 辨識物件。相同 SOP 的預期輸出和既有檔案逐位元組相同才計為已存在；不同則列為衝突。新 series、先前未成功的影像或已刪除的檔案可補寫。若要使用不同清除設定重新產出整批影像，請使用一組新的空資料夾。`Mapping.csv` 保留歷史成功對應，單筆對應並不代表整個檢查的所有檔案都已齊全。
 
-輸出結構如下：
-
-```text
-Output/
-├── New_Patient_ID/
-│   └── New_AccessionNo/
-│       ├── CT_000001.dcm
-│       └── CT_000002.dcm
-└── Mapping.csv
-```
-
-`Mapping.csv` 只記錄已成功寫出的對應，並包含 `Original_StudyDate`；不會把日期不符、略過或寫入失敗的檔案列為成功。
-
-CSV 模式另會在輸出根目錄寫出 `Unmatched_Report.csv`，逐筆列出沒對上的資料與原因：
-
-| Category | 意思 |
-| --- | --- |
-| `date_mismatch` | ID 有對上，但 CSV 的日期和 DICOM StudyDate (0008,0020) 不同；原因欄會列出另一邊的實際日期 |
-| `leading_zero` | ID 去掉開頭的 0 後才相同，常見於 Excel 把 `0012345` 存成 `12345` |
-| `not_found` | CSV 有這列，但輸入資料夾中完全沒有這個 ID |
-| `not_listed` | DICOM 的 ID 不在 CSV 名單，屬正常略過 |
-
-### 日期不符時仍依 Patient ID 輸出
-
-CSV 面板中的「日期不符時仍依 Patient ID 輸出」預設關閉。開啟後，若 DICOM 的 ID＋StudyDate 在 CSV 找不到，但該 ID 在 CSV 中只對應一個 `New_PatientID`，就用該代號輸出。
-
-- 該病人在輸入資料夾中**所有日期**的檢查都會被輸出，請先用「預檢比對」確認
-- 同一個 ID 在 CSV 有多個不同代號時無法判斷，仍會略過並在結果表說明
-- 以這種方式輸出的檢查會在結果表與 `Unmatched_Report.csv` 標為 `date_ignored`，並列出 CSV 與 DICOM 的日期
-
-### 重跑同一個輸出資料夾（跳過已完成）
-
-輸出資料夾裡如果已經有先前產生的 `Mapping.csv`，再跑一次時會：
-
-- 跳過 `Mapping.csv` 已記錄的檢查（以原始 PatientID＋AccessionNumber 判斷），不重寫那些影像
-- 接續既有的編號：AccessionNumber 從最大號碼往後編；自動編號模式下，已出現過的病人沿用原代號
-- 把新轉好的檢查附加到 `Mapping.csv`，舊的對應不會被覆蓋
-
-適合修正 CSV 日期後補轉沒對上的病人。要全部重新轉換，請選一個空的輸出資料夾。`Mapping.csv` 在整批轉換結束時才寫入，所以如果轉到一半關掉分頁，那一批不會被當成已完成。
+**接續 v4.1** 時，將舊輸出根目錄中的 `Mapping.csv` 與既有的 `Unmatched_Report.csv` 移到獨立的院內紀錄資料夾，保留原有影像子目錄。選取原輸出作為研究影像資料夾。若既有影像與舊表無法核對，程式會提示問題；也可從原始輸入重新產出到一組新的空資料夾。
 
 ## 處理模式
 
@@ -66,7 +25,7 @@ CSV 面板中的「日期不符時仍依 Patient ID 輸出」預設關閉。開�
 
 ### CSV 指定代號
 
-新版 CSV 可同時用 PatientID 與 StudyDate `(0008,0020)` 篩選。只有兩者都相符的 DICOM 才會輸出；名單外或日期不符的檔案會略過，不列為 DICOM 錯誤。
+新版 CSV 可同時用 PatientID 與 StudyDate `(0008,0020)` 篩選。只有兩者都相符的 DICOM 才會輸出；名單外或日期不符的檔案預設略過。勾選放寬日期時，只有該病人在名單中對應單一研究代號才可依 ID 輸出。預檢及完成頁會另外列出僅 ID 相符的病人＋日期組數。
 
 CSV 必須是 UTF-8 或 UTF-8 BOM，且第一列正好為：
 
@@ -89,7 +48,7 @@ Original_PatientID,Original_StudyDate,New_PatientID
 - 每一列使用 `Original_PatientID + Original_StudyDate` 的組合作為白名單條件；例如同一 PatientID 的其他檢查日期不會輸出。
 - New_PatientID 必須為 1–64 個 ASCII 英數、底線、連字號或句點，且第一字元必須是英數。
 - 同一 PatientID＋StudyDate 重複相同對應時會自動去重；同一組合指定不同代號時會拒絕載入。
-- 同一位病人的不同日期可使用相同或不同代號；不同 PatientID 不可共用同一代號。
+- 同一位病人的不同日期可使用相同或不同代號；不同 PatientID 不可共用同一代號。匯出前會同時核對歷史對應、保留編號及本批 CSV，並檢查大小寫相撞和 Windows 保留檔名。
 - 支援 LF、CRLF、雙引號、逗號逸出與 UTF-8 BOM。
 - 介面可直接下載只有標題列的 UTF-8 BOM 範本。
 - 舊版 `Original_PatientID,New_PatientID` 兩欄 CSV 仍可匯入，但只會依 PatientID 比對，不會限制 StudyDate。
@@ -113,7 +72,7 @@ PatientID、PatientName 與 AccessionNumber 使用目標式位元組重建，允
 
 支援標準 Implicit VR Little Endian、Explicit VR Little Endian、Explicit VR Big Endian，以及使用 Explicit VR Little Endian dataset encoding 的標準壓縮影像 Transfer Syntax。Deflated Explicit VR Little Endian 不支援，遇到時該檔會報錯且不寫出。
 
-缺少 PatientID、AccessionNumber、Transfer Syntax UID，或重寫後無法重新解析的檔案，會列為 DICOM 錯誤並略過。
+缺少 PatientID、AccessionNumber、有效的 Study／SOP Instance UID 或 Transfer Syntax UID，或重寫後無法重新解析的檔案，會列為 DICOM 錯誤並略過。
 
 ## 完成摘要
 
@@ -132,8 +91,10 @@ PatientID、PatientName 與 AccessionNumber 使用目標式位元組重建，允
 - 單一 DICOM 檔案仍會完整載入瀏覽器記憶體，但整批資料採逐檔讀寫。
 - 正式醫療、研究分享或資料釋出前，仍應使用合格流程抽驗輸出標籤與影像內容。
 
+## 執行測試
+
+在專案目錄執行 `node --test tests/batch.test.cjs`。測試使用合成的 DICOM Part 10 資料與暫存目錄。涵蓋逐檔補轉、不同 Study 共用檢查單號、代號撞號、舊版遷移、日期預檢、像素位元組保留、例外報表及重設。
+
 ## 使用套件
 
-- [dicomParser](https://github.com/cornerstonejs/dicomParser) — DICOM 解析
-- [Tailwind CSS](https://tailwindcss.com/) — 介面樣式
-- [Font Awesome](https://fontawesome.com/) — 圖示
+本離線版內含 dicomParser（檔頭版號 1.8.12）。授權文件位於 `vendor/LICENSE.txt`。

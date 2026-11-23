@@ -238,17 +238,14 @@
      */
     function createCsvMatcher(mapping, includesStudyDate) {
         const aliasesById = new Map();
-        const keysById = new Map();
         const datesById = new Map();
         for (const [key, alias] of mapping) {
             const [patientId, studyDate = ''] = includesStudyDate ? key.split(MAPPING_KEY_SEPARATOR) : [key];
             if (!aliasesById.has(patientId)) {
                 aliasesById.set(patientId, new Set());
-                keysById.set(patientId, []);
                 datesById.set(patientId, []);
             }
             aliasesById.get(patientId).add(alias);
-            keysById.get(patientId).push(key);
             datesById.get(patientId).push(studyDate);
         }
 
@@ -265,7 +262,7 @@
             return {
                 via: 'id_only',
                 alias: aliases.values().next().value,
-                csvKeys: keysById.get(patientId).slice(),
+                csvKeys: [],
                 csvDates: datesById.get(patientId).slice()
             };
         };
@@ -401,7 +398,9 @@
     function nextSequenceNumber(values) {
         let max = 0;
         for (const value of values) {
-            if (/^\d+$/.test(value)) max = Math.max(max, Number(value));
+            const n = Number(value);
+            if (/^\d+$/.test(value) && Number.isSafeInteger(n) && n < Number.MAX_SAFE_INTEGER - 1)
+                max = Math.max(max, n);
         }
         return max + 1;
     }
@@ -457,7 +456,7 @@
             .getUint32(offset, littleEndian);
     }
 
-    function rewriteDicomStrings(byteArray, dataSet, replacements, transferSyntaxUid) {
+    function rewriteDicomStrings(byteArray, dataSet, replacements, transferSyntaxUid, clearTags = []) {
         if (!(byteArray instanceof Uint8Array)) throw new TypeError('byteArray 必須是 Uint8Array');
         if (!dataSet || !dataSet.elements) throw new TypeError('缺少 dicomParser DataSet');
 
@@ -507,30 +506,34 @@
             });
         }
 
-        operations.sort((left, right) => right.dataOffset - left.dataOffset);
+        operations.sort((a, b) => a.dataOffset - b.dataOffset);
         const groupDeltas = new Map();
-        let result = new Uint8Array(byteArray);
-
-        for (const operation of operations) {
-            const oldEnd = operation.dataOffset + operation.oldLength;
-            const expanded = new Uint8Array(result.length + operation.delta);
-            expanded.set(result.subarray(0, operation.dataOffset), 0);
-            expanded.set(operation.newBytes, operation.dataOffset);
-            expanded.set(result.subarray(oldEnd), operation.dataOffset + operation.newBytes.length);
-
-            if (syntax.explicitVr) {
-                writeUint16(expanded, operation.lengthFieldOffset, operation.newBytes.length, syntax.littleEndian);
-            } else {
-                writeUint32(expanded, operation.lengthFieldOffset, operation.newBytes.length, syntax.littleEndian);
-            }
-
-            result = expanded;
-            groupDeltas.set(
-                operation.definition.groupLengthTag,
-                (groupDeltas.get(operation.definition.groupLengthTag) || 0) + operation.delta
-            );
+        const result = new Uint8Array(byteArray.length + operations.reduce((sum, op) => sum + op.delta, 0));
+        let source = 0;
+        let target = 0;
+        for (const op of operations) {
+            if (op.dataOffset < source) throw new Error('DICOM 元素範圍重疊');
+            result.set(byteArray.subarray(source, op.dataOffset), target);
+            target += op.dataOffset - source;
+            const lengthOffset = target - (op.dataOffset - op.lengthFieldOffset);
+            if (syntax.explicitVr) writeUint16(result, lengthOffset, op.newBytes.length, syntax.littleEndian);
+            else writeUint32(result, lengthOffset, op.newBytes.length, syntax.littleEndian);
+            result.set(op.newBytes, target);
+            source = op.dataOffset + op.oldLength;
+            target += op.newBytes.length;
+            const group = op.definition.groupLengthTag;
+            groupDeltas.set(group, (groupDeltas.get(group) || 0) + op.delta);
         }
-
+        result.set(byteArray.subarray(source), target);
+        for (const tag of clearTags) {
+            const element = dataSet.elements[tag];
+            if (!element) continue;
+            const {dataOffset, length} = element;
+            if (!Number.isInteger(dataOffset) || !Number.isInteger(length) || dataOffset < 0 ||
+                length < 0 || dataOffset + length > byteArray.length) throw new Error('敏感標籤範圍無效');
+            const shift = operations.filter(op => op.dataOffset < dataOffset).reduce((sum, op) => sum + op.delta, 0);
+            result.fill(0x20, dataOffset + shift, dataOffset + shift + length);
+        }
         for (const [groupLengthTag, delta] of groupDeltas.entries()) {
             if (delta === 0) continue;
             const groupLengthElement = dataSet.elements[groupLengthTag];
