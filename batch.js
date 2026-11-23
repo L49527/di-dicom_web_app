@@ -46,7 +46,25 @@ const Batch = (() => {
     // separate child directory without changing the existing batch validation.
     const IMAGE_SUBDIR='研究影像';
     const RECORD_SUBDIR='院內對照表_不可對外提供';
-    async function checkOutputRoot(root) {
+    // Allow a shared or nested source/destination, but never treat the generated
+    // research images or PHI-bearing records as source DICOM on a subsequent run.
+    async function folderPlan(input, output) {
+        if (!input || !output) return {kind:'unknown',exclude:[]};
+        if (await input.isSameEntry(output))
+            return {kind:'same',exclude:[IMAGE_SUBDIR,RECORD_SUBDIR]};
+        const outputWithinInput=await input.resolve(output);
+        if (outputWithinInput !== null)
+            return {kind:'output-inside-input',exclude:[outputWithinInput.join('/')]};
+        const inputWithinOutput=await output.resolve(input);
+        if (inputWithinOutput !== null) {
+            if ([IMAGE_SUBDIR,RECORD_SUBDIR].includes(inputWithinOutput[0]))
+                throw Error('原始 DICOM 不能位於輸出的「研究影像」或「院內對照表」資料夾內，請另選原始影像位置。');
+            return {kind:'input-inside-output',exclude:[],inputFirstPart:inputWithinOutput[0]};
+        }
+        return {kind:'separate',exclude:[]};
+    }
+    async function checkOutputRoot(root,input=null) {
+        const plan=await folderPlan(input,root);
         // Old v4.1 exports stored mapping and images together at the root.
         // Never silently reuse or relocate such historical data.
         for (const name of ['Mapping.csv','StudyIndex.json','Unmatched_Report.csv','Failure_Report.csv','.dicom-batch-id']) {
@@ -55,15 +73,19 @@ const Batch = (() => {
         for await (const entry of root.values()) {
             if(entry.name.startsWith('.'))continue;
             if(entry.kind==='directory' && (entry.name===IMAGE_SUBDIR || entry.name===RECORD_SUBDIR))continue;
-            throw Error('輸出主目錄有其他檔案或資料夾：'+entry.name+'。請選擇專用的空輸出目錄，或先備份並整理舊版輸出。');
+            // Same directory: remaining entries are the original source files.
+            if(plan.kind==='same')continue;
+            // Output is a parent of the input: permit only the source's branch.
+            if(plan.kind==='input-inside-output' && entry.kind==='directory' && entry.name===plan.inputFirstPart)continue;
+            throw Error('輸出主目錄有其他檔案或資料夾：'+entry.name+'。請使用原始影像所在目錄，或選擇專用的空輸出目錄。');
         }
     }
     async function child(root,name,create){
         try{return await root.getDirectoryHandle(name,{create});}
         catch(e){if(!create && e.name==='NotFoundError')return null;throw e;}
     }
-    async function outputLayout(root,create=false){
-        await checkOutputRoot(root);
+    async function outputLayout(root,create=false,input=null){
+        await checkOutputRoot(root,input);
         const images=await child(root,IMAGE_SUBDIR,false);
         const records=await child(root,RECORD_SUBDIR,false);
         if(!create && !images && !records)return null;
@@ -72,14 +94,23 @@ const Batch = (() => {
         if(!create && (!images || !records))return null;
         return {images:images||await child(root,IMAGE_SUBDIR,true),records:records||await child(root,RECORD_SUBDIR,true)};
     }
-    async function collect(dir, prefix='', out=[]) {
+    async function collect(dir, prefix='', out=[], excluded=null) {
         for await (const entry of dir.values()) {
             if (entry.name.startsWith('.') || entry.name === 'DICOMDIR') continue;
             const path = prefix + entry.name;
-            if (entry.kind === 'directory') await collect(entry, path+'/', out);
-            else out.push({handle:entry,path});
+            if (entry.kind === 'directory') {
+                if (excluded?.has(path)) continue;
+                // An export from an earlier session may no longer be the selected
+                // destination. Its paired marker still identifies generated data.
+                if (excluded && [IMAGE_SUBDIR,RECORD_SUBDIR].includes(entry.name) && await optionalFile(entry,marker)) continue;
+                await collect(entry, path+'/', out, excluded);
+            } else out.push({handle:entry,path});
         }
         return out;
+    }
+    async function collectInput(input, output=null) {
+        const plan=await folderPlan(input,output);
+        return collect(input,'',[],new Set(plan.exclude));
     }
     function metadata(data) {
         return {origPatientID:str(data,'x00100020'), origAccessionNo:str(data,'x00080050'),
@@ -267,5 +298,5 @@ const Batch = (() => {
         const rows=[...state.successful.values()].map(r=>fields.map(f=>r[f]));
         await save(state.records,'Mapping.csv',csv(headers,rows));
     }
-    return {collect,independent,checkOutputRoot,outputLayout,prepare,pair,convert,saveMapping,checkMeta,metadata,probe,save,csv,fileError,validateOwners};
+    return {collect,collectInput,folderPlan,independent,checkOutputRoot,outputLayout,prepare,pair,convert,saveMapping,checkMeta,metadata,probe,save,csv,fileError,validateOwners};
 })();
