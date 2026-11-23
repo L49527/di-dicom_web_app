@@ -30,7 +30,8 @@
       <p class="hint">將遞迴讀取資料夾內的 DICOM 檔案，原始檔不會被覆蓋。</p>
       <button class="folder" id="output" type="button" data-state="empty" aria-describedby="outputError"><span class="folder-copy"><span class="folder-label">選擇輸出資料夾</span><span class="folder-value">點此選擇資料夾</span></span><span class="folder-state"><span class="folder-state-icon" aria-hidden="true">○</span><span class="folder-state-text">尚未選擇</span></span></button>
       <p class="folder-error" id="outputError" role="alert" hidden></p>
-      <p class="hint">選擇一個輸出主目錄，程式將自動建立以下兩個子資料夾：</p>
+      <p id="folderRelation" class="folder-relation" role="status" hidden></p>
+      <p class="hint">輸出可與輸入相同或互相包含；程式會排除已產生的輸出影像，並自動建立以下兩個子資料夾：</p>
       <div class="output-layout" id="outputLayout">
         <div><span class="path-icon" aria-hidden="true">▣</span> 研究影像 <small>轉換後 DICOM</small></div>
         <div><span class="path-icon protected" aria-hidden="true">▤</span> 院內對照表_不可對外提供 <small>Mapping.csv、索引及報表</small></div>
