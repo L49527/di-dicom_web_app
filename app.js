@@ -1,7 +1,8 @@
 'use strict';
 const Core = globalThis.DicomDeIdCore;
 const $ = id => document.getElementById(id);
-const folderHints = {input:'未選擇',output:'未選擇'};
+const folderHints = {input:'點此選擇資料夾',output:'點此選擇資料夾'};
+const folderErrors = {input:'',output:''};
 const dirs = {input:null,output:null,images:null,records:null};
 const selectedDirs = ['input','output'];
 const optionalTags = [
@@ -23,6 +24,24 @@ for (const [code,title,english] of optionalTags) {
     $('tags').append(label);tagBoxes.push(box);
 }
 function currentTags(){return tagBoxes.filter(b=>b.checked).map(b=>b.value);}
+function folderErrorMessage(error) {
+    const message=error?.message || String(error);
+    if(message.includes('資料夾相同或互相包含'))
+        return '輸入與輸出資料夾不可相同或互相包含，請重新選擇不同位置。';
+    return message;
+}
+function updateFolderState(id) {
+    const button=$(id), error=folderErrors[id], dir=dirs[id];
+    const state=error?'invalid':dir?'selected':'empty';
+    button.dataset.state=state;
+    button.setAttribute('aria-invalid',String(Boolean(error)));
+    button.querySelector('.folder-value').textContent=dir?.name || folderHints[id];
+    button.querySelector('.folder-state-icon').textContent=error?'!':dir?'✓':'○';
+    button.querySelector('.folder-state-text').textContent=error?'選擇錯誤':dir?'已選擇':'尚未選擇';
+    const alert=$(id+'Error');
+    alert.textContent=error?(error+(dir?'（已保留先前選擇的資料夾。）':'')):'';
+    alert.hidden=!error;
+}
 function log(message,type=''){
     const line=new Date().toLocaleTimeString('zh-TW')+' '+message;
     const list=$('log');list.prepend(el('li',line));if(list.children.length>150)list.lastChild.remove();
@@ -41,6 +60,8 @@ function phase(title,n,total){
 function nextStep() {
     if (!globalThis.dicomParser) return 'DICOM 解析器載入失敗，請確認 vendor 資料夾與網頁放在一起。';
     if (!window.showDirectoryPicker || !navigator.locks) return '請使用支援資料夾存取的桌面版 Chrome、Edge 或 Opera 開啟本頁。';
+    if (folderErrors.input) return '請重新選擇輸入資料夾，修正上方的選擇錯誤。';
+    if (folderErrors.output) return '請重新選擇輸出資料夾，修正上方的選擇錯誤。';
     if (!dirs.input) return '請選擇原始 DICOM 資料夾。';
     if (!inputs.length) return '輸入資料夾沒有可掃描的檔案，請重新選擇。';
     if (!dirs.output) return '請選擇輸出資料夾。';
@@ -55,6 +76,7 @@ function dateRule(){
     return $('ignore').checked?'允許同一病人其他日期':'病歷號與指定日期均須相符';
 }
 function refresh() {
+    for(const id of selectedDirs) updateFolderState(id);
     for(const b of document.querySelectorAll('button,input')) b.disabled=busy;
     const needed=nextStep();
     $('next').textContent=busy?'作業進行中，請保持分頁開啟。':needed || '設定已備妥，可開始轉換。';
@@ -81,17 +103,25 @@ async function working(task) {
     finally{busy=false;refresh();}
 }
 for(const id of selectedDirs) $(id).onclick=()=>working(async()=>{
-    const dir=await window.showDirectoryPicker({mode:id==='input'?'read':'readwrite'});
-    const proposed={...dirs,[id]:dir};
-    await Batch.independent({'輸入資料夾':proposed.input,'輸出資料夾':proposed.output});
-    if(id==='output')await Batch.checkOutputRoot(dir);
-    if(id==='input') {
-        phase('掃描輸入資料夾',0,0);
-        inputs=(await Batch.collect(dir)).sort((a,b)=>a.path<b.path?-1:a.path>b.path?1:0);
-        log('已掃描 '+inputs.length+' 個輸入檔案。');
+    try {
+        const dir=await window.showDirectoryPicker({mode:id==='input'?'read':'readwrite'});
+        const proposed={...dirs,[id]:dir};
+        await Batch.independent({'輸入資料夾':proposed.input,'輸出資料夾':proposed.output});
+        if(id==='output')await Batch.checkOutputRoot(dir);
+        if(id==='input') {
+            phase('掃描輸入資料夾',0,0);
+            const scanned=(await Batch.collect(dir)).sort((a,b)=>a.path<b.path?-1:a.path>b.path?1:0);
+            inputs=scanned;
+            log('已掃描 '+inputs.length+' 個輸入檔案。');
+        }
+        dirs[id]=dir;dirs.images=null;dirs.records=null;
+        folderErrors[id]='';invalidate();
+    } catch(e) {
+        if(e.name==='AbortError')return; // 使用者取消選擇時保留原狀態
+        folderErrors[id]=folderErrorMessage(e);
+        updateFolderState(id);
+        throw e;
     }
-    dirs[id]=dir;dirs.images=null;dirs.records=null;
-    $(id).querySelector('.folder-value').textContent=dir.name;invalidate();
 });
 for(const radio of document.querySelectorAll('[name=mode]')) radio.onchange=()=>{mode=radio.value;invalidate();};
 $('ignore').onchange=invalidate;
@@ -235,7 +265,7 @@ $('start').onclick=()=>working(()=>navigator.locks.request('dicom-deid-export',{
 $('reset').onclick=()=>{
     if(busy)return;
     for(const id of Object.keys(dirs))dirs[id]=null;
-    for(const id of selectedDirs)$(id).querySelector('.folder-value').textContent=folderHints[id];
+    for(const id of selectedDirs)folderErrors[id]='';
     inputs=[];mode='';imported=null;csvName='';failureCsvText='';matchCsvText='';
     for(const b of document.querySelectorAll('input[type=radio],input[type=checkbox]'))b.checked=false;
     for(const d of document.querySelectorAll('details'))d.open=false;
