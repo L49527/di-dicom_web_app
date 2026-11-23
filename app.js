@@ -24,11 +24,16 @@ for (const [code,title,english] of optionalTags) {
     $('tags').append(label);tagBoxes.push(box);
 }
 function currentTags(){return tagBoxes.filter(b=>b.checked).map(b=>b.value);}
-function folderErrorMessage(error) {
-    const message=error?.message || String(error);
-    if(message.includes('資料夾相同或互相包含'))
-        return '輸入與輸出資料夾不可相同或互相包含，請重新選擇不同位置。';
-    return message;
+function folderErrorMessage(error) {return error?.message || String(error);}
+function showFolderRelation(plan) {
+    const note=$('folderRelation');
+    const texts={
+        same:'輸入與輸出使用相同資料夾；掃描時將排除自動建立的研究影像與院內對照表。請勿分享整個資料夾。',
+        'output-inside-input':'輸出資料夾位於輸入資料夾內；掃描時會排除整個輸出資料夾，避免再次處理已轉換的影像。',
+        'input-inside-output':'輸入資料夾位於輸出資料夾內；研究影像及院內對照表將分開儲存在輸出主目錄。'
+    };
+    note.textContent=texts[plan?.kind]||'';
+    note.hidden=!note.textContent;
 }
 function updateFolderState(id) {
     const button=$(id), error=folderErrors[id], dir=dirs[id];
@@ -103,23 +108,29 @@ async function working(task) {
     finally{busy=false;refresh();}
 }
 for(const id of selectedDirs) $(id).onclick=()=>working(async()=>{
+    let dir;
     try {
-        const dir=await window.showDirectoryPicker({mode:id==='input'?'read':'readwrite'});
+        dir=await window.showDirectoryPicker({mode:id==='input'?'read':'readwrite'});
         const proposed={...dirs,[id]:dir};
-        await Batch.independent({'輸入資料夾':proposed.input,'輸出資料夾':proposed.output});
-        if(id==='output')await Batch.checkOutputRoot(dir);
+        const plan=await Batch.folderPlan(proposed.input,proposed.output);
+        if(proposed.output)await Batch.checkOutputRoot(proposed.output,proposed.input);
         if(id==='input') {
             phase('掃描輸入資料夾',0,0);
-            const scanned=(await Batch.collect(dir)).sort((a,b)=>a.path<b.path?-1:a.path>b.path?1:0);
-            inputs=scanned;
+            inputs=(await Batch.collectInput(dir,proposed.output)).sort((a,b)=>a.path<b.path?-1:a.path>b.path?1:0);
             log('已掃描 '+inputs.length+' 個輸入檔案。');
+        } else if(proposed.input && ['same','output-inside-input'].includes(plan.kind)) {
+            phase('排除既有輸出後重新掃描',0,0);
+            inputs=(await Batch.collectInput(proposed.input,dir)).sort((a,b)=>a.path<b.path?-1:a.path>b.path?1:0);
+            log('已排除輸出資料夾，剩餘 '+inputs.length+' 個輸入檔案。');
         }
         dirs[id]=dir;dirs.images=null;dirs.records=null;
-        folderErrors[id]='';invalidate();
+        folderErrors.input='';folderErrors.output='';
+        showFolderRelation(plan);
+        invalidate();
     } catch(e) {
-        if(e.name==='AbortError')return; // 使用者取消選擇時保留原狀態
+        if(e.name==='AbortError')return;
         folderErrors[id]=folderErrorMessage(e);
-        updateFolderState(id);
+        invalidate();
         throw e;
     }
 });
@@ -188,7 +199,7 @@ async function execute(preview) {
     const dated=isCsv && imported.includesStudyDate;
     const allowOther=dated && $('ignore').checked;
     const match=Core.createCsvMatcher(mapping,dated);
-    const layout=await Batch.outputLayout(dirs.output,!preview);
+    const layout=await Batch.outputLayout(dirs.output,!preview,dirs.input);
     let state;
     if(layout){
         dirs.images=layout.images;dirs.records=layout.records;
@@ -265,6 +276,7 @@ $('start').onclick=()=>working(()=>navigator.locks.request('dicom-deid-export',{
 $('reset').onclick=()=>{
     if(busy)return;
     for(const id of Object.keys(dirs))dirs[id]=null;
+    showFolderRelation(null);
     for(const id of selectedDirs)folderErrors[id]='';
     inputs=[];mode='';imported=null;csvName='';failureCsvText='';matchCsvText='';
     for(const b of document.querySelectorAll('input[type=radio],input[type=checkbox]'))b.checked=false;
