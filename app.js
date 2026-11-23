@@ -33,6 +33,17 @@ const btnMappingCsv = document.getElementById('btnMappingCsv');
 const mappingCsvInput = document.getElementById('mappingCsvInput');
 const mappingCsvStatus = document.getElementById('mappingCsvStatus');
 const downloadCsvTemplate = document.getElementById('downloadCsvTemplate');
+const btnPrecheck = document.getElementById('btnPrecheck');
+const resultsPanel = document.getElementById('resultsPanel');
+const resultsTitle = document.getElementById('resultsTitle');
+const resultsStats = document.getElementById('resultsStats');
+const resultsNote = document.getElementById('resultsNote');
+const resultsTableWrap = document.getElementById('resultsTableWrap');
+const resultsTableBody = document.getElementById('resultsTableBody');
+const btnDownloadReport = document.getElementById('btnDownloadReport');
+const toastClose = document.getElementById('toastClose');
+let lastReportRows = [];
+let toastTimer = null;
 const modeRadios = Array.from(document.querySelectorAll('input[name="processingMode"]'));
 
 const supportsFSA = 'showDirectoryPicker' in window;
@@ -118,7 +129,9 @@ function showToast(message, type = 'info') {
     const toastMsg = document.getElementById('toastMsg');
 
     toastMsg.textContent = message;
-    toast.className = 'fixed bottom-6 right-6 transform transition-all duration-300 z-50 px-6 py-4 rounded-xl shadow-lg shadow-slate-200 border text-slate-700 bg-white flex items-center gap-3 pointer-events-none';
+    const sticky = type === 'error';
+    toast.className = `fixed bottom-6 right-6 max-w-md transform transition-all duration-300 z-50 px-6 py-4 rounded-xl shadow-lg shadow-slate-200 border text-slate-700 bg-white flex items-start gap-3 ${sticky ? 'pointer-events-auto' : 'pointer-events-none'}`;
+    toastClose.classList.toggle('hidden', !sticky);
 
     if (type === 'success') {
         toast.classList.add('border-emerald-200');
@@ -132,8 +145,131 @@ function showToast(message, type = 'info') {
     }
 
     toast.classList.remove('translate-y-24', 'opacity-0');
-    window.setTimeout(() => toast.classList.add('translate-y-24', 'opacity-0'), 3000);
+    window.clearTimeout(toastTimer);
+    // Errors stay until the user closes them; other messages fade after a few seconds.
+    if (!sticky) toastTimer = window.setTimeout(hideToast, 4000);
 }
+
+function hideToast() {
+    const toast = document.getElementById('toast');
+    toast.classList.add('translate-y-24', 'opacity-0');
+    toast.classList.remove('pointer-events-auto');
+    toast.classList.add('pointer-events-none');
+}
+
+toastClose.addEventListener('click', hideToast);
+
+// ------------------------------------------
+// Results panel
+// ------------------------------------------
+const CATEGORY_LABELS = {
+    date_mismatch: { text: '日期不符', className: 'bg-rose-100 text-rose-700' },
+    leading_zero: { text: '前導 0 遺失', className: 'bg-amber-100 text-amber-700' },
+    not_found: { text: '找不到 ID', className: 'bg-slate-200 text-slate-700' },
+    not_listed: { text: '不在名單', className: 'bg-slate-100 text-slate-500' }
+};
+
+function renderResults({ title, stats, note, rows }) {
+    resultsTitle.lastChild.textContent = title;
+    resultsStats.replaceChildren(...stats.map(stat => {
+        const tones = {
+            good: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+            bad: 'border-rose-200 bg-rose-50 text-rose-700',
+            warn: 'border-amber-200 bg-amber-50 text-amber-700',
+            neutral: 'border-slate-200 bg-slate-50 text-slate-600'
+        };
+        const card = document.createElement('div');
+        card.className = `rounded-xl border px-3 py-2 ${tones[stat.tone] || tones.neutral}`;
+        const value = document.createElement('div');
+        value.className = 'text-xl font-black font-mono';
+        value.textContent = stat.value;
+        const label = document.createElement('div');
+        label.className = 'text-[11px] font-semibold leading-snug';
+        label.textContent = stat.label;
+        card.append(value, label);
+        return card;
+    }));
+    resultsNote.textContent = note || '';
+
+    const problems = (rows || []).filter(row => row.category !== 'not_listed');
+    lastReportRows = rows || [];
+    resultsTableBody.replaceChildren(...problems.slice(0, 200).map(row => {
+        const tr = document.createElement('tr');
+        const badge = CATEGORY_LABELS[row.category];
+        const cells = [
+            null,
+            row.source === 'CSV' ? 'CSV 列' : `DICOM（${row.fileCount} 檔）`,
+            row.patientId,
+            row.studyDate || '（空白）',
+            row.reason
+        ];
+        cells.forEach((text, index) => {
+            const td = document.createElement('td');
+            td.className = index === 4 ? 'px-3 py-2 text-slate-600' : 'px-3 py-2 whitespace-nowrap font-mono text-slate-700';
+            if (index === 0) {
+                const span = document.createElement('span');
+                span.className = `inline-block rounded-md px-2 py-0.5 font-sans font-bold ${badge.className}`;
+                span.textContent = badge.text;
+                td.appendChild(span);
+            } else {
+                td.textContent = text;
+            }
+            tr.appendChild(td);
+        });
+        return tr;
+    }));
+    if (problems.length > 200) {
+        const tr = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = 5;
+        td.className = 'px-3 py-2 text-slate-500';
+        td.textContent = `…另有 ${problems.length - 200} 筆，請下載問題清單查看`;
+        tr.appendChild(td);
+        resultsTableBody.appendChild(tr);
+    }
+    resultsTableWrap.classList.toggle('hidden', problems.length === 0);
+    btnDownloadReport.classList.toggle('hidden', lastReportRows.length === 0);
+    resultsPanel.classList.remove('hidden');
+}
+
+function buildReportCsv(rows) {
+    let content = 'Source,Category,Original_PatientID,Original_StudyDate,New_PatientID,DICOM_File_Count,Reason\n';
+    rows.forEach(row => {
+        content += [
+            row.source,
+            row.category,
+            row.patientId,
+            row.studyDate,
+            row.newPatientId || '',
+            row.source === 'DICOM' ? row.fileCount : '',
+            row.reason
+        ].map(csvEscape).join(',') + '\n';
+    });
+    return `\uFEFF${content}`;
+}
+
+function countProblems(rows) {
+    const csvRows = rows.filter(row => row.source === 'CSV');
+    return {
+        dateMismatch: csvRows.filter(row => row.category === 'date_mismatch').length,
+        leadingZero: csvRows.filter(row => row.category === 'leading_zero').length,
+        notFound: csvRows.filter(row => row.category === 'not_found').length
+    };
+}
+
+btnDownloadReport.addEventListener('click', () => {
+    const blob = new Blob([buildReportCsv(lastReportRows)], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = 'Unmatched_Report.csv';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+});
+
+document.getElementById('btnCloseResults').addEventListener('click', () => resultsPanel.classList.add('hidden'));
 
 function setCsvStatus(message, type = 'idle') {
     const styles = {
@@ -151,6 +287,8 @@ function checkReady() {
     const modeReady = processingMode === 'auto' || processingMode === 'csv';
     const csvReady = processingMode !== 'csv' || importedPatientMapping.size > 0;
     startBtn.disabled = !(supportsFSA && !isProcessing && directoriesReady && modeReady && csvReady);
+    btnPrecheck.disabled = !(supportsFSA && !isProcessing && inputHandle && dicomFilesList.length > 0
+        && processingMode === 'csv' && importedPatientMapping.size > 0);
 }
 
 function setProcessingControlsDisabled(disabled) {
@@ -158,6 +296,7 @@ function setProcessingControlsDisabled(disabled) {
     btnOutput.disabled = disabled || !supportsFSA;
     btnMappingCsv.disabled = disabled;
     downloadCsvTemplate.disabled = disabled;
+    btnPrecheck.disabled = disabled;
     modeRadios.forEach(radio => { radio.disabled = disabled; });
 }
 
@@ -359,6 +498,93 @@ function renderFsaStatusMarkup() {
     return `<div class="text-slate-400">[System] Native File System API Supported: <span class="font-bold ${statusClass}">${statusText}</span></div>`;
 }
 
+const HEADER_PROBE_BYTES = 256 * 1024;
+
+async function readPatientAndStudyDate(fileHandle) {
+    const file = await fileHandle.getFile();
+    const parse = bytes => {
+        const dataSet = dicomParser.parseDicom(bytes, { untilTag: 'x00100020' });
+        return {
+            patientId: cleanDicomString(dataSet.string('x00100020')),
+            studyDate: cleanDicomString(dataSet.string('x00080020'))
+        };
+    };
+    // Only the start of the file is needed; fall back to the whole file if the header is larger.
+    if (file.size > HEADER_PROBE_BYTES) {
+        try {
+            const head = parse(new Uint8Array(await file.slice(0, HEADER_PROBE_BYTES).arrayBuffer()));
+            if (head.patientId) return head;
+        } catch (_) {
+            // Retry with the full file below.
+        }
+    }
+    return parse(new Uint8Array(await file.arrayBuffer()));
+}
+
+btnPrecheck.addEventListener('click', async () => {
+    if (isProcessing || btnPrecheck.disabled) return;
+    isProcessing = true;
+    setProcessingControlsDisabled(true);
+    startBtn.disabled = true;
+    const originalLabel = btnPrecheck.innerHTML;
+    btnPrecheck.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>預檢中…';
+    progressContainer.classList.remove('hidden');
+    progressBar.style.width = '0%';
+    progressPercentage.textContent = '0.0%';
+    progressStatus.textContent = '預檢比對中（只讀取標頭，不寫入檔案）…';
+    logToTerminal(`預檢開始：${dicomFilesList.length} 個檔案 vs CSV ${importedPatientMapping.size} 組對應`, 'system');
+
+    const combos = new Map();
+    let unreadable = 0;
+    let matchedFiles = 0;
+    const total = dicomFilesList.length;
+
+    for (let index = 0; index < total; index++) {
+        try {
+            const { patientId, studyDate } = await readPatientAndStudyDate(dicomFilesList[index]);
+            if (!patientId) throw new Error('Missing PatientID');
+            const comboKey = Core.createPatientStudyKey(patientId, studyDate);
+            if (!combos.has(comboKey)) combos.set(comboKey, { patientId, studyDate, fileCount: 0, matched: false });
+            const combo = combos.get(comboKey);
+            combo.fileCount++;
+            const csvKey = importedCsvIncludesStudyDate ? comboKey : patientId;
+            if (importedPatientMapping.has(csvKey)) {
+                combo.matched = true;
+                matchedFiles++;
+            }
+        } catch (_) {
+            unreadable++;
+        }
+        if ((index + 1) % 20 === 0 || index === total - 1) updateProgress(index + 1, total);
+    }
+
+    const rows = Core.buildMismatchReport(importedPatientMapping, importedCsvIncludesStudyDate, combos.values());
+    const counts = countProblems(rows);
+    const matchedCsvRows = importedPatientMapping.size - rows.filter(row => row.source === 'CSV').length;
+    const problemTotal = counts.dateMismatch + counts.leadingZero + counts.notFound;
+
+    renderResults({
+        title: '預檢結果（尚未轉換）',
+        stats: [
+            { label: `CSV 可對上（共 ${importedPatientMapping.size} 列）`, value: matchedCsvRows, tone: matchedCsvRows === importedPatientMapping.size ? 'good' : 'neutral' },
+            { label: '日期不符', value: counts.dateMismatch, tone: counts.dateMismatch ? 'bad' : 'good' },
+            { label: '前導 0 遺失', value: counts.leadingZero, tone: counts.leadingZero ? 'warn' : 'good' },
+            { label: '資料夾找不到 ID', value: counts.notFound, tone: counts.notFound ? 'warn' : 'good' }
+        ],
+        note: `將輸出 ${matchedFiles} 個檔案；${total - matchedFiles - unreadable} 個檔案不在名單會略過${unreadable ? `；${unreadable} 個檔案無法讀取（可能不是 DICOM）` : ''}。`
+            + (problemTotal ? ' 建議先修正 CSV 後重新匯入，再開始轉換。' : ' CSV 全部對上，可以開始轉換。'),
+        rows
+    });
+    progressStatus.textContent = `預檢完成｜可對上 ${matchedCsvRows}/${importedPatientMapping.size} 列`;
+    logToTerminal(`預檢完成：可對上 ${matchedCsvRows}/${importedPatientMapping.size} 列，日期不符 ${counts.dateMismatch}、前導 0 遺失 ${counts.leadingZero}、找不到 ID ${counts.notFound}`, problemTotal ? 'warning' : 'success');
+    showToast(problemTotal ? `預檢發現 ${problemTotal} 列 CSV 沒對上，請看結果表` : '預檢通過，CSV 全部對上', problemTotal ? 'error' : 'success');
+
+    btnPrecheck.innerHTML = originalLabel;
+    isProcessing = false;
+    setProcessingControlsDisabled(false);
+    checkReady();
+});
+
 startBtn.addEventListener('click', async () => {
     if (isProcessing || startBtn.disabled || dicomFilesList.length === 0) return;
     if (processingMode === 'csv' && importedPatientMapping.size === 0) {
@@ -372,6 +598,7 @@ startBtn.addEventListener('click', async () => {
     startBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i><span>轉換中…</span>';
     progressContainer.classList.remove('hidden');
     progressStatus.textContent = '正在向硬碟串流寫入…';
+    resultsPanel.classList.add('hidden');
 
     patientMapping.clear();
     accessionMapping.clear();
@@ -387,6 +614,7 @@ startBtn.addEventListener('click', async () => {
     const mappingKeys = new Set();
     const studyFileCounts = new Map();
     const seenCsvMappingKeys = new Set();
+    const dicomCombos = new Map();
     const modeLabel = processingMode === 'csv'
         ? `CSV whitelist (${importedCsvName}, ${importedPatientMapping.size} patients)`
         : 'automatic numbering';
@@ -422,10 +650,22 @@ startBtn.addEventListener('click', async () => {
                 const csvMappingKey = importedCsvIncludesStudyDate
                     ? Core.createPatientStudyKey(cleanOriginalPatientId, cleanOriginalStudyDate)
                     : cleanOriginalPatientId;
+                const comboKey = Core.createPatientStudyKey(cleanOriginalPatientId, cleanOriginalStudyDate);
+                if (!dicomCombos.has(comboKey)) {
+                    dicomCombos.set(comboKey, {
+                        patientId: cleanOriginalPatientId,
+                        studyDate: cleanOriginalStudyDate,
+                        fileCount: 0,
+                        matched: false
+                    });
+                }
+                const combo = dicomCombos.get(comboKey);
+                combo.fileCount++;
                 if (!importedPatientMapping.has(csvMappingKey)) {
                     skippedCount++;
                     continue;
                 }
+                combo.matched = true;
                 seenCsvMappingKeys.add(csvMappingKey);
                 newPatientId = importedPatientMapping.get(csvMappingKey);
             } else {
@@ -496,7 +736,7 @@ startBtn.addEventListener('click', async () => {
             }
         } catch (error) {
             errorCount++;
-            logToTerminal(`Error on file ${index + 1}: ${error.message}`, 'error');
+            logToTerminal(`Error on file ${index + 1}（${fileHandle.name}）: ${error.message}`, 'error');
         } finally {
             processedCount++;
             if (processedCount % 10 === 0 || processedCount === totalFiles) updateProgress(processedCount, totalFiles);
@@ -529,13 +769,40 @@ startBtn.addEventListener('click', async () => {
         logToTerminal(`Failed to save Mapping.csv: ${error.message}`, 'error');
     }
 
+    let mismatchSummary = '';
+    let reportRows = [];
+    if (processingMode === 'csv') {
+        ({ summary: mismatchSummary, rows: reportRows } = await writeMismatchReport(dicomCombos));
+    }
+
     const csvNotFoundCount = processingMode === 'csv'
         ? importedPatientMapping.size - seenCsvMappingKeys.size
         : 0;
     const csvMissingLabel = importedCsvIncludesStudyDate ? 'CSV 未找到 ID＋日期' : 'CSV 未找到 ID';
-    const summary = `成功 ${successCount}、ID／日期不符略過 ${skippedCount}、DICOM 錯誤 ${errorCount}、${csvMissingLabel} ${csvNotFoundCount}`;
+    const summary = `成功 ${successCount} 檔、不在 CSV 名單略過 ${skippedCount} 檔、DICOM 錯誤 ${errorCount} 檔、${csvMissingLabel} ${csvNotFoundCount} 列${mismatchSummary}`;
     progressStatus.textContent = mappingWriteFailed ? `影像處理完成，但 Mapping.csv 寫入失敗｜${summary}` : `全部完成｜${summary}`;
     logToTerminal(`Stream Processing Complete! ${summary}${mappingWriteFailed ? '；Mapping.csv write failed' : ''}.`, 'system');
+    const counts = countProblems(reportRows);
+    const stats = [
+        { label: '成功輸出（檔）', value: successCount, tone: successCount ? 'good' : 'neutral' },
+        { label: 'DICOM 錯誤（檔）', value: errorCount, tone: errorCount ? 'bad' : 'good' }
+    ];
+    if (processingMode === 'csv') {
+        stats.splice(1, 0, { label: '不在名單略過（檔）', value: skippedCount, tone: 'neutral' });
+        stats.push({ label: 'CSV 沒對上（列）', value: csvNotFoundCount, tone: csvNotFoundCount ? 'bad' : 'good' });
+    }
+    const noteParts = [];
+    if (counts.dateMismatch) noteParts.push(`日期不符 ${counts.dateMismatch} 列`);
+    if (counts.leadingZero) noteParts.push(`疑似前導 0 遺失 ${counts.leadingZero} 列`);
+    if (counts.notFound) noteParts.push(`資料夾找不到 ID ${counts.notFound} 列`);
+    renderResults({
+        title: mappingWriteFailed ? '轉換結果（Mapping.csv 寫入失敗）' : '轉換結果',
+        stats,
+        note: (noteParts.length ? `CSV 沒對上的原因：${noteParts.join('、')}。下表列出每一筆。` : '')
+            + (errorCount ? ' DICOM 錯誤的檔名請看下方 log。' : ''),
+        rows: reportRows
+    });
+
     const completedWithErrors = mappingWriteFailed || errorCount > 0;
     showToast(completedWithErrors ? `轉換完成，請檢查錯誤紀錄：${summary}` : `去識別化完成：${summary}`, completedWithErrors ? 'error' : 'success');
 
@@ -544,6 +811,44 @@ startBtn.addEventListener('click', async () => {
     setProcessingControlsDisabled(false);
     checkReady();
 });
+
+async function writeMismatchReport(dicomCombos) {
+    const rows = Core.buildMismatchReport(
+        importedPatientMapping,
+        importedCsvIncludesStudyDate,
+        dicomCombos.values()
+    );
+    const problems = rows.filter(row => row.category !== 'not_listed');
+    const dateMismatch = rows.filter(row => row.category === 'date_mismatch' && row.source === 'CSV').length;
+    const leadingZero = rows.filter(row => row.category === 'leading_zero' && row.source === 'CSV').length;
+
+    if (problems.length > 0) {
+        logToTerminal(`CSV 對應問題 ${problems.length} 筆（完整清單見 Unmatched_Report.csv）：`, 'error');
+        problems.slice(0, 30).forEach(row => {
+            const datePart = row.studyDate ? ` StudyDate ${row.studyDate}` : '';
+            const filePart = row.source === 'DICOM' ? `（${row.fileCount} 檔）` : `（CSV 代號 ${row.newPatientId}）`;
+            logToTerminal(`[${row.source}] ID ${row.patientId}${datePart}${filePart}：${row.reason}`, 'error');
+        });
+        if (problems.length > 30) logToTerminal(`…其餘 ${problems.length - 30} 筆請看 Unmatched_Report.csv`, 'error');
+    }
+
+    if (rows.length > 0) {
+        try {
+            const handle = await outputHandle.getFileHandle('Unmatched_Report.csv', { create: true });
+            const writable = await handle.createWritable();
+            await writable.write(buildReportCsv(rows));
+            await writable.close();
+            logToTerminal(`Unmatched_Report.csv saved with ${rows.length} rows.`, 'success');
+        } catch (error) {
+            logToTerminal(`Failed to save Unmatched_Report.csv: ${error.message}`, 'error');
+        }
+    }
+
+    const parts = [];
+    if (dateMismatch > 0) parts.push(`其中日期不符 ${dateMismatch} 列`);
+    if (leadingZero > 0) parts.push(`疑似前導 0 遺失 ${leadingZero} 列`);
+    return { rows, summary: parts.length > 0 ? `（${parts.join('、')}，詳見 Unmatched_Report.csv）` : '' };
+}
 
 function resetApp() {
     if (isProcessing) {
@@ -582,7 +887,10 @@ function resetApp() {
     progressBar.style.width = '0%';
     progressPercentage.textContent = '0.0%';
     progressStatus.textContent = '準備串流…';
+    resultsPanel.classList.add('hidden');
+    lastReportRows = [];
     startBtn.disabled = true;
+    btnPrecheck.disabled = true;
     showToast('系統狀態已重設', 'info');
 }
 

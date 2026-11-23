@@ -216,6 +216,117 @@
         return { mapping, warnings, includesStudyDate };
     }
 
+    function stripLeadingZeros(value) {
+        return String(value ?? '').replace(/^0+(?=.)/, '');
+    }
+
+    function formatDateList(dates) {
+        const list = Array.from(dates).sort();
+        const shown = list.slice(0, 5).map(date => date || '（空白）').join('、');
+        return list.length > 5 ? `${shown}…等 ${list.length} 個` : shown;
+    }
+
+    /**
+     * Explains why DICOM files were skipped and why CSV rows were never used.
+     * dicomCombos: Iterable of { patientId, studyDate, fileCount, matched }.
+     * Returns rows sorted so likely data-entry problems come first.
+     */
+    function buildMismatchReport(mapping, includesStudyDate, dicomCombos) {
+        const csvDatesById = new Map();
+        const csvIdsByStripped = new Map();
+        for (const key of mapping.keys()) {
+            const [patientId, studyDate = ''] = includesStudyDate ? key.split(MAPPING_KEY_SEPARATOR) : [key];
+            if (!csvDatesById.has(patientId)) csvDatesById.set(patientId, new Set());
+            csvDatesById.get(patientId).add(studyDate);
+            const stripped = stripLeadingZeros(patientId);
+            if (!csvIdsByStripped.has(stripped)) csvIdsByStripped.set(stripped, new Set());
+            csvIdsByStripped.get(stripped).add(patientId);
+        }
+
+        const combos = Array.from(dicomCombos);
+        const dicomDatesById = new Map();
+        const dicomIdsByStripped = new Map();
+        const matchedCsvKeys = new Set();
+        for (const combo of combos) {
+            if (!dicomDatesById.has(combo.patientId)) dicomDatesById.set(combo.patientId, new Set());
+            dicomDatesById.get(combo.patientId).add(combo.studyDate);
+            const stripped = stripLeadingZeros(combo.patientId);
+            if (!dicomIdsByStripped.has(stripped)) dicomIdsByStripped.set(stripped, new Set());
+            dicomIdsByStripped.get(stripped).add(combo.patientId);
+            if (combo.matched) {
+                matchedCsvKeys.add(includesStudyDate
+                    ? createPatientStudyKey(combo.patientId, combo.studyDate)
+                    : combo.patientId);
+            }
+        }
+
+        const rows = [];
+
+        for (const combo of combos) {
+            if (combo.matched) continue;
+            let category;
+            let reason;
+            const csvDates = csvDatesById.get(combo.patientId);
+            const zeroVariants = Array.from(csvIdsByStripped.get(stripLeadingZeros(combo.patientId)) || [])
+                .filter(id => id !== combo.patientId);
+            if (csvDates) {
+                category = 'date_mismatch';
+                reason = `ID 有在 CSV，但日期不符；CSV 此 ID 的日期為 ${formatDateList(csvDates)}`;
+            } else if (zeroVariants.length > 0) {
+                category = 'leading_zero';
+                reason = `ID 疑似前導 0 遺失（CSV 寫成 ${zeroVariants.join('、')}，常見於 Excel 存檔）`;
+            } else {
+                category = 'not_listed';
+                reason = '此 ID 不在 CSV 名單（屬正常略過）';
+            }
+            rows.push({
+                source: 'DICOM',
+                category,
+                patientId: combo.patientId,
+                studyDate: combo.studyDate,
+                fileCount: combo.fileCount,
+                reason
+            });
+        }
+
+        for (const key of mapping.keys()) {
+            if (matchedCsvKeys.has(key)) continue;
+            const [patientId, studyDate = ''] = includesStudyDate ? key.split(MAPPING_KEY_SEPARATOR) : [key];
+            let category;
+            let reason;
+            const dicomDates = dicomDatesById.get(patientId);
+            const zeroVariants = Array.from(dicomIdsByStripped.get(stripLeadingZeros(patientId)) || [])
+                .filter(id => id !== patientId);
+            if (dicomDates) {
+                category = 'date_mismatch';
+                reason = `資料夾中有此 ID，但 DICOM StudyDate 為 ${formatDateList(dicomDates)}`;
+            } else if (zeroVariants.length > 0) {
+                category = 'leading_zero';
+                reason = `ID 疑似前導 0 遺失（DICOM 為 ${zeroVariants.join('、')}）`;
+            } else {
+                category = 'not_found';
+                reason = '輸入資料夾中找不到此 ID';
+            }
+            rows.push({
+                source: 'CSV',
+                category,
+                patientId,
+                studyDate,
+                newPatientId: mapping.get(key),
+                fileCount: 0,
+                reason
+            });
+        }
+
+        const order = { date_mismatch: 0, leading_zero: 1, not_found: 2, not_listed: 3 };
+        rows.sort((left, right) =>
+            order[left.category] - order[right.category]
+            || left.patientId.localeCompare(right.patientId)
+            || left.studyDate.localeCompare(right.studyDate)
+            || left.source.localeCompare(right.source));
+        return rows;
+    }
+
     function getTransferSyntaxInfo(transferSyntaxUid) {
         const uid = String(transferSyntaxUid ?? '').replace(/\0/g, '').trim();
 
@@ -366,6 +477,7 @@
         STUDY_DATE_CSV_HEADERS,
         MappingCsvError,
         SAFE_ALIAS_PATTERN,
+        buildMismatchReport,
         createPatientStudyKey,
         getTransferSyntaxInfo,
         normalizeStudyDate,

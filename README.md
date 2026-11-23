@@ -31,6 +31,15 @@ Output/
 
 `Mapping.csv` 只記錄已成功寫出的對應，並包含 `Original_StudyDate`；不會把日期不符、略過或寫入失敗的檔案列為成功。
 
+CSV 模式另會在輸出根目錄寫出 `Unmatched_Report.csv`，逐筆列出沒對上的資料與原因：
+
+| Category | 意思 |
+| --- | --- |
+| `date_mismatch` | ID 有對上，但 CSV 的日期和 DICOM StudyDate (0008,0020) 不同；原因欄會列出另一邊的實際日期 |
+| `leading_zero` | ID 去掉開頭的 0 後才相同，常見於 Excel 把 `0012345` 存成 `12345` |
+| `not_found` | CSV 有這列，但輸入資料夾中完全沒有這個 ID |
+| `not_listed` | DICOM 的 ID 不在 CSV 名單，屬正常略過 |
+
 ## 處理模式
 
 ### 自動編號

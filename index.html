@@ -40,7 +40,7 @@
             </div>
         </div>
         <div class="flex items-center gap-2">
-            <a href="https://github.com/Antigravity" class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded-xl text-sm font-bold flex items-center gap-2 border border-slate-200">
+            <a href="https://github.com/L49527/di-dicom_web_app" target="_blank" rel="noopener" class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded-xl text-sm font-bold flex items-center gap-2 border border-slate-200">
                 <i class="fab fa-github"></i> GitHub
             </a>
             <button type="button" onclick="resetApp()" class="bg-white hover:bg-rose-50 text-slate-600 hover:text-rose-600 border border-slate-200 px-4 py-2 rounded-xl text-sm font-bold flex items-center gap-2 shadow-sm">
@@ -115,6 +115,10 @@
                         </button>
                     </div>
                     <p id="mappingCsvStatus" class="mt-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs leading-relaxed text-slate-500">尚未匯入 CSV</p>
+                    <button id="btnPrecheck" type="button" disabled class="mt-2 w-full rounded-lg bg-white hover:bg-blue-50 border border-primary text-primary disabled:border-slate-200 disabled:text-slate-400 disabled:bg-slate-50 disabled:cursor-not-allowed px-3 py-2 text-xs font-bold transition">
+                        <i class="fas fa-magnifying-glass mr-1"></i>預檢比對（不寫入任何檔案）
+                    </button>
+                    <p class="mt-1 text-[10px] leading-relaxed text-slate-500">選好輸入資料夾並匯入 CSV 後，可先確認哪些 ID＋日期對得上。</p>
                     <p class="mt-2 text-[10px] leading-relaxed text-slate-500">欄位：Original_PatientID, Original_StudyDate, New_PatientID<br>日期接受 2025/12/29、2025-12-29 或 20251229；舊版兩欄 CSV 仍相容。</p>
                 </div>
             </div>
@@ -161,6 +165,34 @@
                 </div>
             </div>
 
+            <div id="resultsPanel" class="hidden px-6 pt-5 pb-1 border-b border-slate-100 bg-white z-10 max-h-[55%] overflow-y-auto flex-none">
+                <div class="flex items-center justify-between gap-3 mb-3">
+                    <h3 id="resultsTitle" class="text-sm font-bold text-slate-800 flex items-center gap-2"><i class="fas fa-clipboard-check text-primary"></i>轉換結果</h3>
+                    <div class="flex items-center gap-2">
+                        <button id="btnDownloadReport" type="button" class="hidden rounded-lg bg-white hover:bg-slate-50 border border-slate-300 text-slate-600 px-3 py-1.5 text-xs font-bold transition">
+                            <i class="fas fa-download mr-1"></i>下載問題清單 CSV
+                        </button>
+                        <button id="btnCloseResults" type="button" aria-label="關閉結果" class="text-slate-400 hover:text-slate-600 px-2 py-1 rounded"><i class="fas fa-xmark"></i></button>
+                    </div>
+                </div>
+                <div id="resultsStats" class="grid grid-cols-2 xl:grid-cols-4 gap-2"></div>
+                <p id="resultsNote" class="mt-3 text-xs text-slate-500 leading-relaxed"></p>
+                <div id="resultsTableWrap" class="hidden mt-3 mb-4 rounded-xl border border-slate-200 overflow-hidden">
+                    <table class="w-full text-xs">
+                        <thead class="bg-slate-50 text-slate-500 text-left">
+                            <tr>
+                                <th class="px-3 py-2 font-semibold whitespace-nowrap">問題</th>
+                                <th class="px-3 py-2 font-semibold whitespace-nowrap">來源</th>
+                                <th class="px-3 py-2 font-semibold whitespace-nowrap">Patient ID</th>
+                                <th class="px-3 py-2 font-semibold whitespace-nowrap">StudyDate</th>
+                                <th class="px-3 py-2 font-semibold whitespace-nowrap">說明</th>
+                            </tr>
+                        </thead>
+                        <tbody id="resultsTableBody" class="divide-y divide-slate-100"></tbody>
+                    </table>
+                </div>
+            </div>
+
             <div class="flex-1 p-6 overflow-hidden flex flex-col bg-slate-50">
                 <div class="bg-white rounded-xl border border-slate-200 flex-1 flex flex-col overflow-hidden shadow-sm">
                     <div class="bg-slate-100 px-4 py-2 border-b border-slate-200 flex items-center gap-2">
@@ -181,9 +213,10 @@
         </section>
     </main>
 
-    <div id="toast" class="fixed bottom-6 right-6 transform translate-y-24 opacity-0 transition-all duration-300 z-50 bg-white border border-slate-200 text-slate-700 px-6 py-4 rounded-xl shadow-xl flex items-center gap-3 pointer-events-none">
+    <div id="toast" role="status" aria-live="polite" class="fixed bottom-6 right-6 max-w-md transform translate-y-24 opacity-0 transition-all duration-300 z-50 bg-white border border-slate-200 text-slate-700 px-6 py-4 rounded-xl shadow-xl flex items-start gap-3 pointer-events-none">
         <i id="toastIcon" class="fas fa-info-circle text-primary text-xl"></i>
-        <span id="toastMsg" class="font-medium text-sm">Notification Message</span>
+        <span id="toastMsg" class="font-medium text-sm leading-relaxed">Notification Message</span>
+        <button id="toastClose" type="button" aria-label="關閉通知" class="hidden ml-2 text-slate-400 hover:text-slate-700"><i class="fas fa-xmark"></i></button>
     </div>
 
     <script src="core.js"></script>
