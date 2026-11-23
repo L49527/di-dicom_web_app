@@ -115,11 +115,12 @@ test('頁面操作：預檢、例外日期、寫入失敗、分流報表與重�
     await fs.writeFile(path.join(input.p,'scan.dcm'),fixture(undefined,{date:'20261123'}));
     const html=await fs.readFile(path.join(__dirname,'../index.html'),'utf8');
     class Node {
-        constructor(tag){this.tag=tag;this.children=[];this.disabled=false;this.checked=false;this.textContent='';}
+        constructor(tag){this.tag=tag;this.children=[];this.disabled=false;this.checked=false;this.textContent='';this.dataset={};this.attrs={};}
+        setAttribute(key,value){this.attrs[key]=value;}
         append(...nodes){this.children.push(...nodes);}
         prepend(node){this.children.unshift(node);}
         replaceChildren(...nodes){this.children=nodes;}
-        querySelector(){return this.span || (this.span=new Node('span'));}
+        querySelector(selector){this.subnodes ||= new Map();if(!this.subnodes.has(selector))this.subnodes.set(selector,new Node('span'));return this.subnodes.get(selector);}
         createTHead(){return this;} createTBody(){return this;} insertRow(){const r=new Node('tr');this.append(r);return r;}
     }
     const ids=new Map([...html.matchAll(/<([a-z0-9]+)\b[^>]*\bid="([^"]+)"/g)].map(([,tag,id])=>[id,new Node(tag)]));
@@ -133,6 +134,19 @@ test('頁面操作：預檢、例外日期、寫入失敗、分流報表與重�
     vm.runInContext(await fs.readFile(path.join(__dirname,'../app.js'),'utf8'),ui);
     const get=k=>ids.get(k);const click=id=>get(id).onclick();
     for(const k of ['input','output'])await click(k);
+    assert.equal(get('input').dataset.state,'selected');
+    assert.equal(get('output').dataset.state,'selected');
+    assert.equal(get('input').querySelector('.folder-state-text').textContent,'已選擇');
+    assert.equal(get('outputError').hidden,true);
+    picker.push(input);await click('output');
+    assert.equal(get('output').dataset.state,'invalid');
+    assert.equal(get('output').attrs['aria-invalid'],'true');
+    assert.match(get('outputError').textContent,/不可相同或互相包含/);
+    assert.equal(get('outputError').hidden,false);
+    assert.equal(get('start').disabled,true);
+    picker.push(output);await click('output');
+    assert.equal(get('output').dataset.state,'selected');
+    assert.equal(get('outputError').hidden,true);
     radios[1].onchange();
     get('csvFile').files=[Object.assign(new Blob(['Original_PatientID,Original_StudyDate,New_PatientID\nP01,20250101,A01\nP01,20260101,A01']),{name:'cohort.csv'})];
     await get('csvFile').onchange();get('ignore').checked=true;get('ignore').onchange();await click('allTags');
@@ -148,6 +162,7 @@ test('頁面操作：預檢、例外日期、寫入失敗、分流報表與重�
     assert.match(await fs.readFile(path.join(records.p,'Unmatched_Report.csv'),'utf8'),/date_ignored/);
     click('reset');assert.equal(get('ignore').checked,false);assert.equal(get('tagCount').textContent,'0 項');
     assert.equal(get('start').disabled,true);assert.equal(get('results').hidden,true);
+    assert.equal(get('input').dataset.state,'empty');assert.equal(get('output').dataset.state,'empty');
 });
 
 test('雙資料夾模式：預檢不建立目錄，執行時自動分流並安全續跑',async t=>{
