@@ -40,6 +40,14 @@ CSV 模式另會在輸出根目錄寫出 `Unmatched_Report.csv`，逐筆列出�
 | `not_found` | CSV 有這列，但輸入資料夾中完全沒有這個 ID |
 | `not_listed` | DICOM 的 ID 不在 CSV 名單，屬正常略過 |
 
+### 日期不符時仍依 Patient ID 輸出
+
+CSV 面板中的「日期不符時仍依 Patient ID 輸出」預設關閉。開啟後，若 DICOM 的 ID＋StudyDate 在 CSV 找不到，但該 ID 在 CSV 中只對應一個 `New_PatientID`，就用該代號輸出。
+
+- 該病人在輸入資料夾中**所有日期**的檢查都會被輸出，請先用「預檢比對」確認
+- 同一個 ID 在 CSV 有多個不同代號時無法判斷，仍會略過並在結果表說明
+- 以這種方式輸出的檢查會在結果表與 `Unmatched_Report.csv` 標為 `date_ignored`，並列出 CSV 與 DICOM 的日期
+
 ### 重跑同一個輸出資料夾（跳過已完成）
 
 輸出資料夾裡如果已經有先前產生的 `Mapping.csv`，再跑一次時會：

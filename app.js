@@ -35,6 +35,7 @@ const mappingCsvInput = document.getElementById('mappingCsvInput');
 const mappingCsvStatus = document.getElementById('mappingCsvStatus');
 const downloadCsvTemplate = document.getElementById('downloadCsvTemplate');
 const btnPrecheck = document.getElementById('btnPrecheck');
+const ignoreDateToggle = document.getElementById('ignoreDateToggle');
 const resultsPanel = document.getElementById('resultsPanel');
 const resultsTitle = document.getElementById('resultsTitle');
 const resultsStats = document.getElementById('resultsStats');
@@ -164,6 +165,7 @@ toastClose.addEventListener('click', hideToast);
 // Results panel
 // ------------------------------------------
 const CATEGORY_LABELS = {
+    date_ignored: { text: '忽略日期輸出', className: 'bg-blue-100 text-blue-700' },
     date_mismatch: { text: '日期不符', className: 'bg-rose-100 text-rose-700' },
     leading_zero: { text: '前導 0 遺失', className: 'bg-amber-100 text-amber-700' },
     not_found: { text: '找不到 ID', className: 'bg-slate-200 text-slate-700' },
@@ -249,6 +251,33 @@ function buildReportCsv(rows) {
     return `\uFEFF${content}`;
 }
 
+function recordDateIgnored(target, patientId, studyDate, result) {
+    const key = Core.createPatientStudyKey(patientId, studyDate);
+    if (!target.has(key)) {
+        target.set(key, {
+            source: 'DICOM',
+            category: 'date_ignored',
+            patientId,
+            studyDate,
+            newPatientId: result.alias,
+            fileCount: 0,
+            reason: `日期不符，已依 ID 輸出為 ${result.alias}（CSV 日期：${Array.from(new Set(result.csvDates)).sort().join('、')}）`
+        });
+    }
+    target.get(key).fileCount++;
+}
+
+// When ID-only output is on, explain why some date mismatches were still skipped.
+function annotateAmbiguous(rows) {
+    if (!ignoreDateToggle.checked) return rows;
+    rows.forEach(row => {
+        if (row.source === 'DICOM' && row.category === 'date_mismatch') {
+            row.reason += '。此 ID 在 CSV 有多個 New_PatientID，無法只依 ID 判斷，所以沒有輸出';
+        }
+    });
+    return rows;
+}
+
 function countProblems(rows) {
     const csvRows = rows.filter(row => row.source === 'CSV');
     return {
@@ -298,6 +327,7 @@ function setProcessingControlsDisabled(disabled) {
     btnMappingCsv.disabled = disabled;
     downloadCsvTemplate.disabled = disabled;
     btnPrecheck.disabled = disabled;
+    ignoreDateToggle.disabled = disabled;
     modeRadios.forEach(radio => { radio.disabled = disabled; });
 }
 
@@ -584,6 +614,10 @@ btnPrecheck.addEventListener('click', async () => {
         }
     }
     const combos = new Map();
+    const matchCsv = Core.createCsvMatcher(importedPatientMapping, importedCsvIncludesStudyDate);
+    const allowIdOnly = ignoreDateToggle.checked;
+    const extraMatchedKeys = new Set();
+    const dateIgnored = new Map();
     let unreadable = 0;
     let matchedFiles = 0;
     let doneFiles = 0;
@@ -597,13 +631,16 @@ btnPrecheck.addEventListener('click', async () => {
             if (!combos.has(comboKey)) combos.set(comboKey, { patientId, studyDate, fileCount: 0, matched: false });
             const combo = combos.get(comboKey);
             combo.fileCount++;
-            const csvKey = importedCsvIncludesStudyDate ? comboKey : patientId;
+            const result = matchCsv(patientId, studyDate, allowIdOnly);
+            const usable = result && result.alias;
+            if (usable) result.csvKeys.forEach(key => extraMatchedKeys.add(key));
             if (doneStudyKeys.has(createMappingKey(patientId, accession))) {
                 combo.matched = true;
                 doneFiles++;
-            } else if (importedPatientMapping.has(csvKey)) {
+            } else if (usable) {
                 combo.matched = true;
                 matchedFiles++;
+                if (result.via === 'id_only') recordDateIgnored(dateIgnored, patientId, studyDate, result);
             }
         } catch (_) {
             unreadable++;
@@ -611,8 +648,12 @@ btnPrecheck.addEventListener('click', async () => {
         if ((index + 1) % 20 === 0 || index === total - 1) updateProgress(index + 1, total);
     }
 
-    const rows = Core.buildMismatchReport(importedPatientMapping, importedCsvIncludesStudyDate, combos.values());
+    const rows = annotateAmbiguous([
+        ...dateIgnored.values(),
+        ...Core.buildMismatchReport(importedPatientMapping, importedCsvIncludesStudyDate, combos.values(), extraMatchedKeys)
+    ]);
     const counts = countProblems(rows);
+    const ignoredFiles = Array.from(dateIgnored.values()).reduce((sum, row) => sum + row.fileCount, 0);
     const matchedCsvRows = importedPatientMapping.size - rows.filter(row => row.source === 'CSV').length;
     const problemTotal = counts.dateMismatch + counts.leadingZero + counts.notFound;
 
@@ -624,7 +665,7 @@ btnPrecheck.addEventListener('click', async () => {
             { label: '前導 0 遺失', value: counts.leadingZero, tone: counts.leadingZero ? 'warn' : 'good' },
             { label: '資料夾找不到 ID', value: counts.notFound, tone: counts.notFound ? 'warn' : 'good' }
         ],
-        note: `將輸出 ${matchedFiles} 個檔案；${doneFiles ? `${doneFiles} 個檔案先前已完成會跳過；` : ''}${total - matchedFiles - doneFiles - unreadable} 個檔案不在名單會略過${unreadable ? `；${unreadable} 個檔案無法讀取（可能不是 DICOM）` : ''}。`
+        note: `將輸出 ${matchedFiles} 個檔案${ignoredFiles ? `（其中 ${ignoredFiles} 個是忽略日期、只依 ID 輸出，請確認下表）` : ''}；${doneFiles ? `${doneFiles} 個檔案先前已完成會跳過；` : ''}${total - matchedFiles - doneFiles - unreadable} 個檔案不在名單會略過${unreadable ? `；${unreadable} 個檔案無法讀取（可能不是 DICOM）` : ''}。`
             + (problemTotal ? ' 建議先修正 CSV 後重新匯入，再開始轉換。' : ' CSV 全部對上，可以開始轉換。'),
         rows
     });
@@ -695,11 +736,15 @@ startBtn.addEventListener('click', async () => {
     const studyFileCounts = new Map();
     const seenCsvMappingKeys = new Set();
     const dicomCombos = new Map();
+    const dateIgnoredRows = new Map();
+    const matchCsv = Core.createCsvMatcher(importedPatientMapping, importedCsvIncludesStudyDate);
+    const allowIdOnly = processingMode === 'csv' && ignoreDateToggle.checked;
     const modeLabel = processingMode === 'csv'
         ? `CSV whitelist (${importedCsvName}, ${importedPatientMapping.size} patients)`
         : 'automatic numbering';
 
     logToTerminal(`Started Streaming Engine. Mode: ${modeLabel}. Targets: ${totalFiles} files.`, 'system');
+    if (allowIdOnly) logToTerminal('已開啟「日期不符時仍依 Patient ID 輸出」。', 'warning');
 
     for (let index = 0; index < totalFiles; index++) {
         const fileHandle = dicomFilesList[index];
@@ -728,9 +773,8 @@ startBtn.addEventListener('click', async () => {
             const isDone = doneStudyKeys.has(createMappingKey(cleanOriginalPatientId, cleanOriginalAccession));
             let newPatientId;
             if (processingMode === 'csv') {
-                const csvMappingKey = importedCsvIncludesStudyDate
-                    ? Core.createPatientStudyKey(cleanOriginalPatientId, cleanOriginalStudyDate)
-                    : cleanOriginalPatientId;
+                const matchResult = matchCsv(cleanOriginalPatientId, cleanOriginalStudyDate, allowIdOnly);
+                const usable = Boolean(matchResult && matchResult.alias);
                 const comboKey = Core.createPatientStudyKey(cleanOriginalPatientId, cleanOriginalStudyDate);
                 if (!dicomCombos.has(comboKey)) {
                     dicomCombos.set(comboKey, {
@@ -742,19 +786,21 @@ startBtn.addEventListener('click', async () => {
                 }
                 const combo = dicomCombos.get(comboKey);
                 combo.fileCount++;
+                if (usable) matchResult.csvKeys.forEach(key => seenCsvMappingKeys.add(key));
                 if (isDone) {
                     combo.matched = true;
-                    if (importedPatientMapping.has(csvMappingKey)) seenCsvMappingKeys.add(csvMappingKey);
                     alreadyDoneCount++;
                     continue;
                 }
-                if (!importedPatientMapping.has(csvMappingKey)) {
+                if (!usable) {
                     skippedCount++;
                     continue;
                 }
                 combo.matched = true;
-                seenCsvMappingKeys.add(csvMappingKey);
-                newPatientId = importedPatientMapping.get(csvMappingKey);
+                if (matchResult.via === 'id_only') {
+                    recordDateIgnored(dateIgnoredRows, cleanOriginalPatientId, cleanOriginalStudyDate, matchResult);
+                }
+                newPatientId = matchResult.alias;
             } else {
                 if (isDone) {
                     alreadyDoneCount++;
@@ -863,7 +909,7 @@ startBtn.addEventListener('click', async () => {
     let mismatchSummary = '';
     let reportRows = [];
     if (processingMode === 'csv') {
-        ({ summary: mismatchSummary, rows: reportRows } = await writeMismatchReport(dicomCombos));
+        ({ summary: mismatchSummary, rows: reportRows } = await writeMismatchReport(dicomCombos, seenCsvMappingKeys, dateIgnoredRows));
     }
 
     const csvNotFoundCount = processingMode === 'csv'
@@ -887,13 +933,15 @@ startBtn.addEventListener('click', async () => {
         stats.push({ label: 'CSV 沒對上（列）', value: csvNotFoundCount, tone: csvNotFoundCount ? 'bad' : 'good' });
     }
     const noteParts = [];
+    const ignoredFiles = reportRows.filter(row => row.category === 'date_ignored').reduce((sum, row) => sum + row.fileCount, 0);
+    if (ignoredFiles) noteParts.push(`忽略日期、只依 ID 輸出 ${ignoredFiles} 檔`);
     if (counts.dateMismatch) noteParts.push(`日期不符 ${counts.dateMismatch} 列`);
     if (counts.leadingZero) noteParts.push(`疑似前導 0 遺失 ${counts.leadingZero} 列`);
     if (counts.notFound) noteParts.push(`資料夾找不到 ID ${counts.notFound} 列`);
     renderResults({
         title: mappingWriteFailed ? '轉換結果（Mapping.csv 寫入失敗）' : '轉換結果',
         stats,
-        note: (noteParts.length ? `CSV 沒對上的原因：${noteParts.join('、')}。下表列出每一筆。` : '')
+        note: (noteParts.length ? `需要注意：${noteParts.join('、')}。下表列出每一筆。` : '')
             + (errorCount ? ' DICOM 錯誤的檔名請看下方 log。' : ''),
         rows: reportRows
     });
@@ -907,12 +955,16 @@ startBtn.addEventListener('click', async () => {
     checkReady();
 });
 
-async function writeMismatchReport(dicomCombos) {
-    const rows = Core.buildMismatchReport(
-        importedPatientMapping,
-        importedCsvIncludesStudyDate,
-        dicomCombos.values()
-    );
+async function writeMismatchReport(dicomCombos, matchedCsvKeys, dateIgnoredRows) {
+    const rows = annotateAmbiguous([
+        ...dateIgnoredRows.values(),
+        ...Core.buildMismatchReport(
+            importedPatientMapping,
+            importedCsvIncludesStudyDate,
+            dicomCombos.values(),
+            matchedCsvKeys
+        )
+    ]);
     const problems = rows.filter(row => row.category !== 'not_listed');
     const dateMismatch = rows.filter(row => row.category === 'date_mismatch' && row.source === 'CSV').length;
     const leadingZero = rows.filter(row => row.category === 'leading_zero' && row.source === 'CSV').length;

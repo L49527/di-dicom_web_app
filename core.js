@@ -231,7 +231,47 @@
      * dicomCombos: Iterable of { patientId, studyDate, fileCount, matched }.
      * Returns rows sorted so likely data-entry problems come first.
      */
-    function buildMismatchReport(mapping, includesStudyDate, dicomCombos) {
+    /**
+     * Looks up the New_PatientID for one DICOM file.
+     * With allowIdOnly, a file whose StudyDate is not in the CSV still matches when every CSV row
+     * for that Patient ID uses the same New_PatientID; otherwise it is reported as ambiguous.
+     */
+    function createCsvMatcher(mapping, includesStudyDate) {
+        const aliasesById = new Map();
+        const keysById = new Map();
+        const datesById = new Map();
+        for (const [key, alias] of mapping) {
+            const [patientId, studyDate = ''] = includesStudyDate ? key.split(MAPPING_KEY_SEPARATOR) : [key];
+            if (!aliasesById.has(patientId)) {
+                aliasesById.set(patientId, new Set());
+                keysById.set(patientId, []);
+                datesById.set(patientId, []);
+            }
+            aliasesById.get(patientId).add(alias);
+            keysById.get(patientId).push(key);
+            datesById.get(patientId).push(studyDate);
+        }
+
+        return function match(patientId, studyDate, allowIdOnly) {
+            const exactKey = includesStudyDate ? createPatientStudyKey(patientId, studyDate) : patientId;
+            if (mapping.has(exactKey)) {
+                return { via: 'exact', alias: mapping.get(exactKey), csvKeys: [exactKey] };
+            }
+            if (!includesStudyDate || !allowIdOnly || !aliasesById.has(patientId)) return null;
+            const aliases = aliasesById.get(patientId);
+            if (aliases.size !== 1) {
+                return { via: 'ambiguous', alias: null, csvKeys: [], aliases: Array.from(aliases) };
+            }
+            return {
+                via: 'id_only',
+                alias: aliases.values().next().value,
+                csvKeys: keysById.get(patientId).slice(),
+                csvDates: datesById.get(patientId).slice()
+            };
+        };
+    }
+
+    function buildMismatchReport(mapping, includesStudyDate, dicomCombos, extraMatchedCsvKeys) {
         const csvDatesById = new Map();
         const csvIdsByStripped = new Map();
         for (const key of mapping.keys()) {
@@ -246,7 +286,7 @@
         const combos = Array.from(dicomCombos);
         const dicomDatesById = new Map();
         const dicomIdsByStripped = new Map();
-        const matchedCsvKeys = new Set();
+        const matchedCsvKeys = new Set(extraMatchedCsvKeys || []);
         for (const combo of combos) {
             if (!dicomDatesById.has(combo.patientId)) dicomDatesById.set(combo.patientId, new Set());
             dicomDatesById.get(combo.patientId).add(combo.studyDate);
@@ -517,6 +557,7 @@
         MappingCsvError,
         SAFE_ALIAS_PATTERN,
         buildMismatchReport,
+        createCsvMatcher,
         nextSequenceNumber,
         parseExistingMapping,
         createPatientStudyKey,
