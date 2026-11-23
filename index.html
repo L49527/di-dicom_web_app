@@ -25,9 +25,11 @@
   <aside class="settings" aria-label="批次設定">
     <section class="panel settings-section">
       <div class="section-heading"><span class="step">01</span><h2>選擇目錄</h2></div>
-      <button class="folder" id="input" type="button"><span class="folder-label">選擇輸入資料夾</span><span class="folder-value">未選擇</span></button>
+      <button class="folder" id="input" type="button" data-state="empty" aria-describedby="inputError"><span class="folder-copy"><span class="folder-label">選擇輸入資料夾</span><span class="folder-value">點此選擇資料夾</span></span><span class="folder-state"><span class="folder-state-icon" aria-hidden="true">○</span><span class="folder-state-text">尚未選擇</span></span></button>
+      <p class="folder-error" id="inputError" role="alert" hidden></p>
       <p class="hint">將遞迴讀取資料夾內的 DICOM 檔案，原始檔不會被覆蓋。</p>
-      <button class="folder" id="output" type="button"><span class="folder-label">選擇輸出資料夾</span><span class="folder-value">未選擇</span></button>
+      <button class="folder" id="output" type="button" data-state="empty" aria-describedby="outputError"><span class="folder-copy"><span class="folder-label">選擇輸出資料夾</span><span class="folder-value">點此選擇資料夾</span></span><span class="folder-state"><span class="folder-state-icon" aria-hidden="true">○</span><span class="folder-state-text">尚未選擇</span></span></button>
+      <p class="folder-error" id="outputError" role="alert" hidden></p>
       <p class="hint">選擇一個輸出主目錄，程式將自動建立以下兩個子資料夾：</p>
       <div class="output-layout" id="outputLayout">
         <div><span class="path-icon" aria-hidden="true">▣</span> 研究影像 <small>轉換後 DICOM</small></div>
