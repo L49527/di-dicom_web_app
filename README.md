@@ -40,6 +40,16 @@ CSV 模式另會在輸出根目錄寫出 `Unmatched_Report.csv`，逐筆列出�
 | `not_found` | CSV 有這列，但輸入資料夾中完全沒有這個 ID |
 | `not_listed` | DICOM 的 ID 不在 CSV 名單，屬正常略過 |
 
+### 重跑同一個輸出資料夾（跳過已完成）
+
+輸出資料夾裡如果已經有先前產生的 `Mapping.csv`，再跑一次時會：
+
+- 跳過 `Mapping.csv` 已記錄的檢查（以原始 PatientID＋AccessionNumber 判斷），不重寫那些影像
+- 接續既有的編號：AccessionNumber 從最大號碼往後編；自動編號模式下，已出現過的病人沿用原代號
+- 把新轉好的檢查附加到 `Mapping.csv`，舊的對應不會被覆蓋
+
+適合修正 CSV 日期後補轉沒對上的病人。要全部重新轉換，請選一個空的輸出資料夾。`Mapping.csv` 在整批轉換結束時才寫入，所以如果轉到一半關掉分頁，那一批不會被當成已完成。
+
 ## 處理模式
 
 ### 自動編號

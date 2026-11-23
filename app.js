@@ -15,6 +15,7 @@ let importedCsvIncludesStudyDate = false;
 let patientMapping = new Map();
 let accessionMapping = new Map();
 let mappingLog = [];
+const sequenceNext = new WeakMap();
 
 const btnInput = document.getElementById('btnInput');
 const btnOutput = document.getElementById('btnOutput');
@@ -405,6 +406,16 @@ btnOutput.addEventListener('click', async () => {
         labelOutput.classList.remove('text-slate-400');
         labelOutput.classList.add('text-emerald-600', 'font-bold');
         logToTerminal(`Output directory selected: ${outputHandle.name} (Write Permission Granted)`, 'system');
+        try {
+            const existing = await loadExistingMapping(outputHandle);
+            if (existing.length > 0) {
+                logToTerminal(`輸出資料夾已有 Mapping.csv（${describeExistingMapping(existing)}）：轉換時會跳過這些已完成的檢查，並接續編號。`, 'warning');
+                showToast(`偵測到已完成的 ${existing.length} 筆檢查，重跑時會自動跳過`, 'info');
+            }
+        } catch (error) {
+            logToTerminal(`輸出資料夾的 Mapping.csv 無法讀取：${error.message}。開始轉換時會停止，請改選空資料夾或修正該檔。`, 'error');
+            showToast('輸出資料夾的 Mapping.csv 格式不正確', 'error');
+        }
         checkReady();
     } catch (error) {
         if (error.name !== 'AbortError') showToast('無法取得寫入權限', 'error');
@@ -425,8 +436,36 @@ async function scanDirectory(dirHandle, fileList) {
 // 4. DICOM Streaming and Rewriting
 // ------------------------------------------
 function getSequenceId(originalId, prefix, mapping) {
-    if (!mapping.has(originalId)) mapping.set(originalId, `${prefix}${mapping.size + 1}`);
+    if (!mapping.has(originalId)) {
+        const next = sequenceNext.get(mapping) || 1;
+        mapping.set(originalId, `${prefix}${next}`);
+        sequenceNext.set(mapping, next + 1);
+    }
     return mapping.get(originalId);
+}
+
+function resetSequence(mapping, next = 1) {
+    mapping.clear();
+    sequenceNext.set(mapping, next);
+}
+
+// Reads Mapping.csv left in the output folder by an earlier run. Returns [] when there is none.
+async function loadExistingMapping(dirHandle) {
+    let fileHandle;
+    try {
+        fileHandle = await dirHandle.getFileHandle('Mapping.csv');
+    } catch (error) {
+        if (error.name === 'NotFoundError' || error.name === 'TypeMismatchError') return [];
+        throw error;
+    }
+    const file = await fileHandle.getFile();
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(await file.arrayBuffer());
+    return Core.parseExistingMapping(text);
+}
+
+function describeExistingMapping(rows) {
+    const patients = new Set(rows.map(row => row.origPatientID)).size;
+    return `${patients} 位病人、${rows.length} 筆檢查`;
 }
 
 async function getNestedDirectoryHandle(rootHandle, pathParts) {
@@ -506,7 +545,8 @@ async function readPatientAndStudyDate(fileHandle) {
         const dataSet = dicomParser.parseDicom(bytes, { untilTag: 'x00100020' });
         return {
             patientId: cleanDicomString(dataSet.string('x00100020')),
-            studyDate: cleanDicomString(dataSet.string('x00080020'))
+            studyDate: cleanDicomString(dataSet.string('x00080020')),
+            accession: cleanDicomString(dataSet.string('x00080050'))
         };
     };
     // Only the start of the file is needed; fall back to the whole file if the header is larger.
@@ -534,21 +574,34 @@ btnPrecheck.addEventListener('click', async () => {
     progressStatus.textContent = '預檢比對中（只讀取標頭，不寫入檔案）…';
     logToTerminal(`預檢開始：${dicomFilesList.length} 個檔案 vs CSV ${importedPatientMapping.size} 組對應`, 'system');
 
+    let doneStudyKeys = new Set();
+    if (outputHandle) {
+        try {
+            doneStudyKeys = new Set((await loadExistingMapping(outputHandle))
+                .map(row => createMappingKey(row.origPatientID, row.origAccessionNo)));
+        } catch (error) {
+            logToTerminal(`輸出資料夾的 Mapping.csv 無法讀取：${error.message}`, 'error');
+        }
+    }
     const combos = new Map();
     let unreadable = 0;
     let matchedFiles = 0;
+    let doneFiles = 0;
     const total = dicomFilesList.length;
 
     for (let index = 0; index < total; index++) {
         try {
-            const { patientId, studyDate } = await readPatientAndStudyDate(dicomFilesList[index]);
+            const { patientId, studyDate, accession } = await readPatientAndStudyDate(dicomFilesList[index]);
             if (!patientId) throw new Error('Missing PatientID');
             const comboKey = Core.createPatientStudyKey(patientId, studyDate);
             if (!combos.has(comboKey)) combos.set(comboKey, { patientId, studyDate, fileCount: 0, matched: false });
             const combo = combos.get(comboKey);
             combo.fileCount++;
             const csvKey = importedCsvIncludesStudyDate ? comboKey : patientId;
-            if (importedPatientMapping.has(csvKey)) {
+            if (doneStudyKeys.has(createMappingKey(patientId, accession))) {
+                combo.matched = true;
+                doneFiles++;
+            } else if (importedPatientMapping.has(csvKey)) {
                 combo.matched = true;
                 matchedFiles++;
             }
@@ -571,7 +624,7 @@ btnPrecheck.addEventListener('click', async () => {
             { label: '前導 0 遺失', value: counts.leadingZero, tone: counts.leadingZero ? 'warn' : 'good' },
             { label: '資料夾找不到 ID', value: counts.notFound, tone: counts.notFound ? 'warn' : 'good' }
         ],
-        note: `將輸出 ${matchedFiles} 個檔案；${total - matchedFiles - unreadable} 個檔案不在名單會略過${unreadable ? `；${unreadable} 個檔案無法讀取（可能不是 DICOM）` : ''}。`
+        note: `將輸出 ${matchedFiles} 個檔案；${doneFiles ? `${doneFiles} 個檔案先前已完成會跳過；` : ''}${total - matchedFiles - doneFiles - unreadable} 個檔案不在名單會略過${unreadable ? `；${unreadable} 個檔案無法讀取（可能不是 DICOM）` : ''}。`
             + (problemTotal ? ' 建議先修正 CSV 後重新匯入，再開始轉換。' : ' CSV 全部對上，可以開始轉換。'),
         rows
     });
@@ -600,18 +653,45 @@ startBtn.addEventListener('click', async () => {
     progressStatus.textContent = '正在向硬碟串流寫入…';
     resultsPanel.classList.add('hidden');
 
-    patientMapping.clear();
-    accessionMapping.clear();
-    mappingLog = [];
+    let existingRows;
+    try {
+        existingRows = await loadExistingMapping(outputHandle);
+    } catch (error) {
+        logToTerminal(`無法讀取輸出資料夾既有的 Mapping.csv：${error.message}`, 'error');
+        showToast('輸出資料夾的 Mapping.csv 無法讀取，已停止。請改選空資料夾或修正該檔。', 'error');
+        progressStatus.textContent = '已停止：既有 Mapping.csv 無法讀取';
+        isProcessing = false;
+        startBtn.innerHTML = '<i class="fas fa-play"></i><span>開始串流轉換</span>';
+        setProcessingControlsDisabled(false);
+        checkReady();
+        return;
+    }
+
+    resetSequence(patientMapping, Core.nextSequenceNumber(existingRows.map(row => row.newPatientID)));
+    resetSequence(accessionMapping, Core.nextSequenceNumber(existingRows.map(row => row.newAccessionNo)));
+    mappingLog = existingRows.slice();
+    const doneStudyKeys = new Set();
+    existingRows.forEach(row => {
+        doneStudyKeys.add(createMappingKey(row.origPatientID, row.origAccessionNo));
+        if (!patientMapping.has(row.origPatientID)) patientMapping.set(row.origPatientID, row.newPatientID);
+        accessionMapping.set(createMappingKey(row.origPatientID, row.origAccessionNo), row.newAccessionNo);
+    });
+    if (existingRows.length > 0) {
+        logToTerminal(`沿用既有 Mapping.csv（${describeExistingMapping(existingRows)}），已完成的檢查會跳過。`, 'system');
+    }
 
     let processedCount = 0;
+    let alreadyDoneCount = 0;
     let successCount = 0;
     let skippedCount = 0;
     let errorCount = 0;
     let mappingWriteFailed = false;
     const totalFiles = dicomFilesList.length;
     const tagsToClear = getSelectedTags();
-    const mappingKeys = new Set();
+    const mappingKeys = new Set(existingRows.map(row => createMappingKey(
+        createMappingKey(row.origPatientID, row.origStudyDate),
+        row.origAccessionNo
+    )));
     const studyFileCounts = new Map();
     const seenCsvMappingKeys = new Set();
     const dicomCombos = new Map();
@@ -645,6 +725,7 @@ startBtn.addEventListener('click', async () => {
             if (!patientIdElement || !cleanOriginalPatientId) throw new Error('Missing PatientID (0010,0020)');
             if (!accessionElement || !cleanOriginalAccession) throw new Error('Missing AccessionNumber (0008,0050)');
 
+            const isDone = doneStudyKeys.has(createMappingKey(cleanOriginalPatientId, cleanOriginalAccession));
             let newPatientId;
             if (processingMode === 'csv') {
                 const csvMappingKey = importedCsvIncludesStudyDate
@@ -661,6 +742,12 @@ startBtn.addEventListener('click', async () => {
                 }
                 const combo = dicomCombos.get(comboKey);
                 combo.fileCount++;
+                if (isDone) {
+                    combo.matched = true;
+                    if (importedPatientMapping.has(csvMappingKey)) seenCsvMappingKeys.add(csvMappingKey);
+                    alreadyDoneCount++;
+                    continue;
+                }
                 if (!importedPatientMapping.has(csvMappingKey)) {
                     skippedCount++;
                     continue;
@@ -669,6 +756,10 @@ startBtn.addEventListener('click', async () => {
                 seenCsvMappingKeys.add(csvMappingKey);
                 newPatientId = importedPatientMapping.get(csvMappingKey);
             } else {
+                if (isDone) {
+                    alreadyDoneCount++;
+                    continue;
+                }
                 newPatientId = getSequenceId(cleanOriginalPatientId, '', patientMapping);
             }
 
@@ -763,7 +854,7 @@ startBtn.addEventListener('click', async () => {
         const csvWritable = await csvFileHandle.createWritable();
         await csvWritable.write(`\uFEFF${csvContent}`);
         await csvWritable.close();
-        logToTerminal(`Mapping.csv saved with ${mappingLog.length} successful mapping rows.`, 'success');
+        logToTerminal(`Mapping.csv saved with ${mappingLog.length} mapping rows (${existingRows.length} from earlier runs).`, 'success');
     } catch (error) {
         mappingWriteFailed = true;
         logToTerminal(`Failed to save Mapping.csv: ${error.message}`, 'error');
@@ -779,7 +870,10 @@ startBtn.addEventListener('click', async () => {
         ? importedPatientMapping.size - seenCsvMappingKeys.size
         : 0;
     const csvMissingLabel = importedCsvIncludesStudyDate ? 'CSV 未找到 ID＋日期' : 'CSV 未找到 ID';
-    const summary = `成功 ${successCount} 檔、不在 CSV 名單略過 ${skippedCount} 檔、DICOM 錯誤 ${errorCount} 檔、${csvMissingLabel} ${csvNotFoundCount} 列${mismatchSummary}`;
+    const doneLabel = alreadyDoneCount ? `、先前已完成略過 ${alreadyDoneCount} 檔` : '';
+    const summary = processingMode === 'csv'
+        ? `成功 ${successCount} 檔${doneLabel}、不在 CSV 名單略過 ${skippedCount} 檔、DICOM 錯誤 ${errorCount} 檔、${csvMissingLabel} ${csvNotFoundCount} 列${mismatchSummary}`
+        : `成功 ${successCount} 檔${doneLabel}、DICOM 錯誤 ${errorCount} 檔`;
     progressStatus.textContent = mappingWriteFailed ? `影像處理完成，但 Mapping.csv 寫入失敗｜${summary}` : `全部完成｜${summary}`;
     logToTerminal(`Stream Processing Complete! ${summary}${mappingWriteFailed ? '；Mapping.csv write failed' : ''}.`, 'system');
     const counts = countProblems(reportRows);
@@ -787,6 +881,7 @@ startBtn.addEventListener('click', async () => {
         { label: '成功輸出（檔）', value: successCount, tone: successCount ? 'good' : 'neutral' },
         { label: 'DICOM 錯誤（檔）', value: errorCount, tone: errorCount ? 'bad' : 'good' }
     ];
+    if (alreadyDoneCount) stats.splice(1, 0, { label: '先前已完成略過（檔）', value: alreadyDoneCount, tone: 'neutral' });
     if (processingMode === 'csv') {
         stats.splice(1, 0, { label: '不在名單略過（檔）', value: skippedCount, tone: 'neutral' });
         stats.push({ label: 'CSV 沒對上（列）', value: csvNotFoundCount, tone: csvNotFoundCount ? 'bad' : 'good' });
@@ -832,7 +927,8 @@ async function writeMismatchReport(dicomCombos) {
         if (problems.length > 30) logToTerminal(`…其餘 ${problems.length - 30} 筆請看 Unmatched_Report.csv`, 'error');
     }
 
-    if (rows.length > 0) {
+    // Always overwrite, so a report from an earlier run never looks current.
+    {
         try {
             const handle = await outputHandle.getFileHandle('Unmatched_Report.csv', { create: true });
             const writable = await handle.createWritable();
@@ -864,8 +960,8 @@ function resetApp() {
     importedCsvWarnings = [];
     importedCsvName = '';
     importedCsvIncludesStudyDate = false;
-    patientMapping.clear();
-    accessionMapping.clear();
+    resetSequence(patientMapping);
+    resetSequence(accessionMapping);
     mappingLog = [];
 
     modeRadios.forEach(radio => { radio.checked = false; });

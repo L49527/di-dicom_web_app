@@ -327,6 +327,45 @@
         return rows;
     }
 
+    const OUTPUT_MAPPING_HEADERS = ['Modality', 'Original_PatientID', 'Original_StudyDate', 'New_PatientID', 'Original_AccessionNo', 'New_AccessionNo'];
+
+    function unescapeCsvFormulaGuard(value) {
+        // Mapping.csv prefixes values starting with = + - @ with an apostrophe; undo that.
+        return /^'[=+\-@]/.test(value) ? value.slice(1) : value;
+    }
+
+    /**
+     * Reads a Mapping.csv written by a previous run so a new run can skip finished studies
+     * and continue numbering instead of starting again at 1.
+     */
+    function parseExistingMapping(text) {
+        const rows = parseCsvRows(text);
+        if (rows.length === 0) return [];
+        const headers = rows[0].values.map(value => value.trim());
+        if (!headersMatch(headers, OUTPUT_MAPPING_HEADERS)) {
+            throw new MappingCsvError(`既有 Mapping.csv 的標題不是 ${OUTPUT_MAPPING_HEADERS.join(',')}`, rows[0].lineNumber);
+        }
+        return rows.slice(1).map(row => {
+            if (row.values.length !== OUTPUT_MAPPING_HEADERS.length) {
+                throw new MappingCsvError(`既有 Mapping.csv 每列必須有 ${OUTPUT_MAPPING_HEADERS.length} 欄`, row.lineNumber);
+            }
+            const [modality, origPatientID, origStudyDate, newPatientID, origAccessionNo, newAccessionNo] = row.values
+                .map(value => unescapeCsvFormulaGuard(value.trim()));
+            if (!origPatientID || !origAccessionNo || !newPatientID || !newAccessionNo) {
+                throw new MappingCsvError('既有 Mapping.csv 有空白的 ID 或 AccessionNo', row.lineNumber);
+            }
+            return { modality, origPatientID, origStudyDate, newPatientID, origAccessionNo, newAccessionNo };
+        });
+    }
+
+    function nextSequenceNumber(values) {
+        let max = 0;
+        for (const value of values) {
+            if (/^\d+$/.test(value)) max = Math.max(max, Number(value));
+        }
+        return max + 1;
+    }
+
     function getTransferSyntaxInfo(transferSyntaxUid) {
         const uid = String(transferSyntaxUid ?? '').replace(/\0/g, '').trim();
 
@@ -478,6 +517,8 @@
         MappingCsvError,
         SAFE_ALIAS_PATTERN,
         buildMismatchReport,
+        nextSequenceNumber,
+        parseExistingMapping,
         createPatientStudyKey,
         getTransferSyntaxInfo,
         normalizeStudyDate,
