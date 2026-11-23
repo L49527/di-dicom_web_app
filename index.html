@@ -1,19 +1,80 @@
 <!doctype html>
-<html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>DICOM 研究代號轉換 · v4.2</title><link rel="stylesheet" href="style.css"></head>
-<body><header><div><h1>DICOM 研究代號轉換 <small>v4.2</small></h1><p>本機處理 · 影像與院內紀錄分開儲存</p></div><nav><a href="https://github.com/L49527/di-dicom_web_app" target="_blank" rel="noopener">GitHub</a><button id="reset">重設本批</button></nav></header>
-<main><aside class="panel"><section><h2>資料夾</h2>
-<button class="folder" id="input">原始 DICOM <span>選擇輸入資料夾</span></button>
-<button class="folder" id="images">研究影像 <span>選擇影像輸出資料夾</span></button>
-<button class="folder" id="records">院內紀錄 <span>選擇對照表資料夾</span></button>
-<p class="hint">請分別選擇三個獨立資料夾。院內紀錄含原始病歷號。</p></section>
-<section><h2>處理模式</h2><div class="options">
-<label><input type="radio" name="mode" value="auto"> 全部病人自動編號</label>
-<label><input type="radio" name="mode" value="csv"> 依 CSV 指定研究代號</label></div>
-<div id="csvPanel" hidden><div class="actions"><button id="importCsv">匯入 CSV</button><button id="template">下載範本</button></div><input id="csvFile" type="file" accept=".csv,text/csv" hidden><p id="csvInfo">尚未匯入 CSV</p>
-<label id="ignoreLabel" class="exception"><input type="checkbox" id="ignore"> 日期不符時，仍輸出代號唯一的同一病人其他日期</label><button id="precheck">預檢名單</button></div></section>
-<section><h2>標籤設定</h2><p class="hint">固定改寫病歷號、檢查單號及原有病人姓名。</p><details id="tagDetails"><summary>選擇額外清除欄位 <span id="tagCount">0 項</span></summary><button id="allTags">全選</button><div id="tags"></div></details></section></aside>
-<article><section class="panel job"><h2>本批作業</h2><dl id="summary"></dl><p id="next" role="status"></p><button class="primary" id="start" disabled>開始轉換</button></section>
-<section class="panel" id="progressPanel" hidden><h2 id="phase">處理中</h2><progress id="progress" value="0" max="1"></progress><p id="counter"></p></section>
-<section class="panel" id="results" hidden aria-live="polite"><h2 id="resultTitle"></h2><div id="stats"></div><div id="notes"></div><details id="failures" hidden><summary id="failTitle">失敗清單</summary><div id="failTable" class="scroll"></div><button id="downloadFail">下載失敗清單 CSV</button></details><details id="matches" hidden><summary>檢視名單比對明細</summary><div id="matchTable" class="scroll"></div><button id="downloadMatch">下載比對清單 CSV</button></details></section>
-<details class="panel" id="logPanel"><summary>執行紀錄</summary><ol id="log"></ol></details></article></main>
-<script src="vendor/dicomParser.min.js"></script><script src="core.js"></script><script src="batch.js"></script><script src="app.js"></script></body></html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f3f8fc">
+  <title>DICOM De-ID WebEngine v4.3 · 研究代號轉換</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true">✚</span>
+    <div>
+      <h1>DICOM De-ID <span>WebEngine v4.3</span></h1>
+      <p>本機逐檔處理 · Patient ID + StudyDate 指定代號</p>
+    </div>
+  </div>
+  <nav aria-label="網站操作">
+    <a class="nav-button" href="https://github.com/L49527/di-dicom_web_app" target="_blank" rel="noopener noreferrer">GitHub</a>
+    <button id="reset" class="nav-button" type="button">↻ 重設本批</button>
+  </nav>
+</header>
+<main class="workspace">
+  <aside class="settings" aria-label="批次設定">
+    <section class="panel settings-section">
+      <div class="section-heading"><span class="step">01</span><h2>選擇目錄</h2></div>
+      <button class="folder" id="input" type="button"><span class="folder-label">選擇輸入資料夾</span><span class="folder-value">未選擇</span></button>
+      <p class="hint">將遞迴讀取資料夾內的 DICOM 檔案，原始檔不會被覆蓋。</p>
+      <button class="folder" id="output" type="button"><span class="folder-label">選擇輸出資料夾</span><span class="folder-value">未選擇</span></button>
+      <p class="hint">選擇一個輸出主目錄，程式將自動建立以下兩個子資料夾：</p>
+      <div class="output-layout" id="outputLayout">
+        <div><span class="path-icon" aria-hidden="true">▣</span> 研究影像 <small>轉換後 DICOM</small></div>
+        <div><span class="path-icon protected" aria-hidden="true">▤</span> 院內對照表_不可對外提供 <small>Mapping.csv、索引及報表</small></div>
+      </div>
+      <p class="privacy-note">注意：輸出主目錄包含原始病歷號對照資料，不能整個資料夾對外分享。</p>
+    </section>
+    <section class="panel settings-section">
+      <div class="section-heading"><span class="step">02</span><h2>每次選擇處理模式</h2></div>
+      <div class="mode-options">
+        <label class="mode-option"><input type="radio" name="mode" value="auto"><span><strong>自動編號</strong><small>全部病人依序改為 1、2、3…</small></span></label>
+        <label class="mode-option"><input type="radio" name="mode" value="csv"><span><strong>CSV 指定代號</strong><small>依 Patient ID＋StudyDate 比對名單</small></span></label>
+      </div>
+      <div id="csvPanel" class="csv-panel" hidden>
+        <div class="actions"><button id="importCsv" class="action-primary" type="button">匯入對照 CSV</button><button id="template" type="button">↓ 下載範本</button></div>
+        <input id="csvFile" type="file" accept=".csv,text/csv" hidden>
+        <p id="csvInfo" class="csv-info">尚未匯入 CSV</p>
+        <label id="ignoreLabel" class="exception"><input type="checkbox" id="ignore"> <span><strong>日期不符時仍依 Patient ID 輸出</strong><small>僅限該病人在 CSV 中對應單一研究代號，可能包含其他檢查日期。</small></span></label>
+        <button id="precheck" class="full-button" type="button">⌕ 預檢比對（不寫入任何檔案）</button>
+        <p class="hint">CSV 欄位：Original_PatientID、Original_StudyDate、New_PatientID；亦支援舊版兩欄格式。</p>
+      </div>
+    </section>
+    <section class="panel settings-section">
+      <div class="section-heading"><span class="step">03</span><h2>敏感標籤去識別化設定</h2></div>
+      <div class="required-tags"><strong>必要去識別化（無法取消）</strong><p>PatientID、AccessionNumber 與原有 PatientName 將被改寫為對應代號。</p></div>
+      <details id="tagDetails" class="tag-details"><summary>額外清除的敏感標籤 <span class="tag-tools"><span id="tagCount">0 項</span><span aria-hidden="true">⌄</span></span></summary>
+        <div class="tag-actions"><button id="allTags" type="button">全選</button><span>勾選後只清除存在於最外層的指定標籤</span></div><div id="tags" class="tag-grid"></div>
+      </details>
+    </section>
+  </aside>
+  <article class="monitor" aria-label="執行與結果">
+    <section class="panel run-panel">
+      <div class="monitor-heading"><div><div class="section-heading"><span class="step">04</span><h2>執行處理</h2></div><p class="progress-caption">串流進度：<strong id="counter">0 / 0</strong></p></div><button class="primary" id="start" type="button" disabled>▶ 開始轉換</button></div>
+      <div class="run-body">
+        <div class="summary-card"><h3>本批作業摘要</h3><dl id="summary"></dl><p id="next" class="next-step" role="status"></p></div>
+        <div id="progressPanel" class="progress-card" hidden><div class="progress-heading"><h3 id="phase">處理中</h3><span id="progressPct">0%</span></div><progress id="progress" value="0" max="1"></progress></div>
+        <div class="terminal"><div class="terminal-bar"><span class="lights" aria-hidden="true">● ● ●</span> STREAM OUTPUT TERMINAL</div><ol id="terminalLog" aria-live="polite" aria-label="即時執行狀態"><li>[System] 系統已就緒，請選擇資料夾與本批處理模式。</li></ol></div>
+      </div>
+    </section>
+    <section class="panel results-panel" id="results" hidden aria-live="polite"><div class="section-heading"><span class="step">05</span><h2 id="resultTitle">轉換結果</h2></div><div id="stats" class="stats-grid"></div><div id="notes" class="result-notes"></div>
+      <details id="failures" class="result-details" hidden><summary id="failTitle">失敗清單</summary><div id="failTable" class="scroll"></div><button id="downloadFail" type="button">↓ 下載失敗清單 CSV</button></details>
+      <details id="matches" class="result-details" hidden><summary>檢視名單比對明細</summary><div id="matchTable" class="scroll"></div><button id="downloadMatch" type="button">↓ 下載比對清單 CSV</button></details>
+    </section>
+    <details class="panel history-panel" id="logPanel"><summary>執行紀錄 <span class="history-hint">遇到錯誤時自動展開</span></summary><ol id="log"></ol></details>
+    <p class="disclaimer">本工具只處理指定的最外層 DICOM 標籤，不等同完整 PS3.15 去識別化。研究資料交付前仍需檢查序列、私有標籤及影像燒錄資訊。</p>
+  </article>
+</main>
+<script src="vendor/dicomParser.min.js"></script><script src="core.js"></script><script src="batch.js"></script><script src="app.js"></script>
+</body>
+</html>

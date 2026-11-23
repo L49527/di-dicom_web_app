@@ -42,6 +42,36 @@ const Batch = (() => {
             }
         }
     }
+    // The user picks only a root output folder. Keep PHI-bearing records in a
+    // separate child directory without changing the existing batch validation.
+    const IMAGE_SUBDIR='研究影像';
+    const RECORD_SUBDIR='院內對照表_不可對外提供';
+    async function checkOutputRoot(root) {
+        // Old v4.1 exports stored mapping and images together at the root.
+        // Never silently reuse or relocate such historical data.
+        for (const name of ['Mapping.csv','StudyIndex.json','Unmatched_Report.csv','Failure_Report.csv','.dicom-batch-id']) {
+            if(await optionalFile(root,name))throw Error('輸出主目錄已有舊版 '+name+'。請先備份，將研究影像與院內對照表整理至指定的兩個子資料夾後再選擇；程式不會自動搬移敏感資料。');
+        }
+        for await (const entry of root.values()) {
+            if(entry.name.startsWith('.'))continue;
+            if(entry.kind==='directory' && (entry.name===IMAGE_SUBDIR || entry.name===RECORD_SUBDIR))continue;
+            throw Error('輸出主目錄有其他檔案或資料夾：'+entry.name+'。請選擇專用的空輸出目錄，或先備份並整理舊版輸出。');
+        }
+    }
+    async function child(root,name,create){
+        try{return await root.getDirectoryHandle(name,{create});}
+        catch(e){if(!create && e.name==='NotFoundError')return null;throw e;}
+    }
+    async function outputLayout(root,create=false){
+        await checkOutputRoot(root);
+        const images=await child(root,IMAGE_SUBDIR,false);
+        const records=await child(root,RECORD_SUBDIR,false);
+        if(!create && !images && !records)return null;
+        if(images && !records && (await collect(images)).length)
+            throw Error('已有研究影像，但缺少「院內對照表_不可對外提供」。請先復原同一批的對照資料，不可重新編號。');
+        if(!create && (!images || !records))return null;
+        return {images:images||await child(root,IMAGE_SUBDIR,true),records:records||await child(root,RECORD_SUBDIR,true)};
+    }
     async function collect(dir, prefix='', out=[]) {
         for await (const entry of dir.values()) {
             if (entry.name.startsWith('.') || entry.name === 'DICOMDIR') continue;
@@ -237,5 +267,5 @@ const Batch = (() => {
         const rows=[...state.successful.values()].map(r=>fields.map(f=>r[f]));
         await save(state.records,'Mapping.csv',csv(headers,rows));
     }
-    return {collect,independent,prepare,pair,convert,saveMapping,checkMeta,metadata,probe,save,csv,fileError,validateOwners};
+    return {collect,independent,checkOutputRoot,outputLayout,prepare,pair,convert,saveMapping,checkMeta,metadata,probe,save,csv,fileError,validateOwners};
 })();

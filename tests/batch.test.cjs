@@ -15,7 +15,12 @@ class Handle {
         try{await fs.access(p);}catch{throw Object.assign(Error(name),{name:'NotFoundError'});}
         return new Handle(p,'file',this.control);
     }
-    async getDirectoryHandle(name){const p=path.join(this.p,name);await fs.mkdir(p,{recursive:true});return new Handle(p,'directory',this.control);}
+    async getDirectoryHandle(name,opts={}){
+        const p=path.join(this.p,name);
+        if(opts.create)await fs.mkdir(p,{recursive:true});
+        else{try{if(!(await fs.stat(p)).isDirectory())throw Error('Not a directory');}catch{throw Object.assign(Error(name),{name:'NotFoundError'});}}
+        return new Handle(p,'directory',this.control);
+    }
     async removeEntry(name){await fs.unlink(path.join(this.p,name));}
     async getFile(){return new Blob([await fs.readFile(this.p)]);}
     async createWritable(){let bytes;return {
@@ -26,7 +31,7 @@ class Handle {
 async function setup(t) {
     const root=await fs.mkdtemp(path.join(os.tmpdir(),'didicom-v42-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
     const h=new Handle(root,'directory',{});
-    const images=await h.getDirectoryHandle('images'),records=await h.getDirectoryHandle('records');
+    const images=await h.getDirectoryHandle('images',{create:true}),records=await h.getDirectoryHandle('records',{create:true});
     const open=(list=new Map(),dated=false)=>Batch.prepare(images,records,list,dated);
     return {root,h,images,records,open};
 }
@@ -105,7 +110,8 @@ test('舊版只靠影像辨識已完成 SOP，後補沿用原對照',async t=>{
     assert.equal(await convert(resumed,fixture()),'exists');assert.equal(await convert(resumed,fixture('1.2.3.2')),'written');
 });
 test('頁面操作：預檢、例外日期、寫入失敗、分流報表與重設',async t=>{
-    const {h,images,records}=await setup(t),input=await h.getDirectoryHandle('input');
+    const {h}=await setup(t),input=await h.getDirectoryHandle('input',{create:true}),output=await h.getDirectoryHandle('output',{create:true});
+    const images=await output.getDirectoryHandle('研究影像',{create:true}),records=await output.getDirectoryHandle('院內對照表_不可對外提供',{create:true});
     await fs.writeFile(path.join(input.p,'scan.dcm'),fixture(undefined,{date:'20261123'}));
     const html=await fs.readFile(path.join(__dirname,'../index.html'),'utf8');
     class Node {
@@ -122,11 +128,11 @@ test('頁面操作：預檢、例外日期、寫入失敗、分流報表與重�
     const document={getElementById:k=>ids.get(k),createElement:tag=>{const n=new Node(tag);nodes.push(n);return n;},
         querySelectorAll:q=>q==='[name=mode]'?radios:nodes.filter(n=>q==='button,input'?['button','input'].includes(n.tag):
             q==='details'?n.tag==='details':['radio','checkbox'].includes(n.type)||n===ids.get('ignore'))};
-    const picker=[input,images,records],ui=vm.createContext({document,window:{showDirectoryPicker:async()=>picker.shift()},
+    const picker=[input,output],ui=vm.createContext({document,window:{showDirectoryPicker:async()=>picker.shift()},
         navigator:{locks:{request:(_id,_opts,fn)=>fn({})}},DicomDeIdCore:Core,dicomParser:parser,Batch,Uint8Array,TextDecoder});
     vm.runInContext(await fs.readFile(path.join(__dirname,'../app.js'),'utf8'),ui);
     const get=k=>ids.get(k);const click=id=>get(id).onclick();
-    for(const k of ['input','images','records'])await click(k);
+    for(const k of ['input','output'])await click(k);
     radios[1].onchange();
     get('csvFile').files=[Object.assign(new Blob(['Original_PatientID,Original_StudyDate,New_PatientID\nP01,20250101,A01\nP01,20260101,A01']),{name:'cohort.csv'})];
     await get('csvFile').onchange();get('ignore').checked=true;get('ignore').onchange();await click('allTags');
@@ -142,4 +148,37 @@ test('頁面操作：預檢、例外日期、寫入失敗、分流報表與重�
     assert.match(await fs.readFile(path.join(records.p,'Unmatched_Report.csv'),'utf8'),/date_ignored/);
     click('reset');assert.equal(get('ignore').checked,false);assert.equal(get('tagCount').textContent,'0 項');
     assert.equal(get('start').disabled,true);assert.equal(get('results').hidden,true);
+});
+
+test('雙資料夾模式：預檢不建立目錄，執行時自動分流並安全續跑',async t=>{
+    const {h}=await setup(t);
+    const output=await h.getDirectoryHandle('new-output',{create:true});
+    assert.equal(await Batch.outputLayout(output,false),null);
+    assert.deepEqual(await fs.readdir(output.p),[]);
+    const {images,records}=await Batch.outputLayout(output,true);
+    assert.deepEqual((await fs.readdir(output.p)).sort(),['研究影像','院內對照表_不可對外提供'].sort());
+    let state=await Batch.prepare(images,records,new Map(),false);
+    await Batch.pair(state);
+    const data=fixture();
+    assert.equal(await convert(state,data),'written');
+    await Batch.saveMapping(state);
+    state=await Batch.prepare(images,records,new Map(),false);
+    assert.equal(await convert(state,data),'exists');
+    assert.equal((await Batch.collect(images)).length,1);
+    assert.equal((await Batch.collect(records)).some(x=>x.path==='Mapping.csv'),true);
+});
+
+test('輸出主目錄含舊版對照表時拒絕默默搬移',async t=>{
+    const {h}=await setup(t);const output=await h.getDirectoryHandle('old-export',{create:true});
+    await fs.writeFile(path.join(output.p,'Mapping.csv'),'Original_PatientID,New_PatientID');
+    await assert.rejects(Batch.outputLayout(output,true),/舊版 Mapping.csv/);
+    assert.deepEqual(await fs.readdir(output.p),['Mapping.csv']);
+});
+
+test('研究影像存在但對照資料遺失時禁止重新編號',async t=>{
+    const {h}=await setup(t);const output=await h.getDirectoryHandle('partial',{create:true});
+    const images=await output.getDirectoryHandle('研究影像',{create:true});
+    await fs.writeFile(path.join(images.p,'CT_000001.dcm'),fixture());
+    await assert.rejects(Batch.outputLayout(output,true),/缺少「院內對照表/);
+    assert.equal((await fs.readdir(output.p)).includes('院內對照表_不可對外提供'),false);
 });

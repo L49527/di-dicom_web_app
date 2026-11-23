@@ -1,9 +1,9 @@
 'use strict';
 const Core = globalThis.DicomDeIdCore;
 const $ = id => document.getElementById(id);
-const roles = {input:'原始 DICOM',images:'研究影像',records:'院內紀錄'};
-const folderHints = {input:'選擇輸入資料夾',images:'選擇影像輸出資料夾',records:'選擇對照表資料夾'};
-const dirs = {input:null,images:null,records:null};
+const folderHints = {input:'未選擇',output:'未選擇'};
+const dirs = {input:null,output:null,images:null,records:null};
+const selectedDirs = ['input','output'];
 const optionalTags = [
     ['00100030','出生日期','PatientBirthDate'],['00100040','性別','PatientSex'],
     ['00101010','年齡','PatientAge'],['00101040','地址','PatientAddress'],
@@ -18,19 +18,32 @@ function el(tag,text) {const node=document.createElement(tag);if(text!=null) nod
 for (const [code,title,english] of optionalTags) {
     const label=el('label'); label.className='tag';
     const box=el('input'); box.type='checkbox';box.value='x'+code;
-    label.append(box,' '+title,el('small',english+' ('+code.slice(0,4)+','+code.slice(4)+')'));
+    const text=el('span');text.append(title,el('small',english+' ('+code.slice(0,4)+','+code.slice(4)+')'));
+    label.append(box,text);
     $('tags').append(label);tagBoxes.push(box);
 }
 function currentTags(){return tagBoxes.filter(b=>b.checked).map(b=>b.value);}
-function log(message){const list=$('log');list.prepend(el('li',new Date().toLocaleTimeString('zh-TW')+' '+message));if(list.children.length>150)list.lastChild.remove();}
-function phase(title,n,total){$('progressPanel').hidden=false;$('phase').textContent=title;$('progress').max=total||1;$('progress').value=n;$('counter').textContent=total?n+' / '+total+' 檔':'';}
+function log(message,type=''){
+    const line=new Date().toLocaleTimeString('zh-TW')+' '+message;
+    const list=$('log');list.prepend(el('li',line));if(list.children.length>150)list.lastChild.remove();
+    const terminal=$('terminalLog');const item=el('li','[System] '+line);
+    if(type)item.className=type==='error'?'error-line':'success-line';
+    terminal.append(item);if(terminal.children.length>80)terminal.firstChild.remove();
+    if(type==='error')$('logPanel').open=true;
+}
+
+function phase(title,n,total){
+    $('progressPanel').hidden=false;$('phase').textContent=title;$('progress').max=total||1;$('progress').value=n;
+    $('counter').textContent=total?n+' / '+total:'0 / 0';
+    $('progressPct').textContent=total?Math.round(n/total*100)+'%':'0%';
+}
+
 function nextStep() {
     if (!globalThis.dicomParser) return 'DICOM 解析器載入失敗，請確認 vendor 資料夾與網頁放在一起。';
     if (!window.showDirectoryPicker || !navigator.locks) return '請使用支援資料夾存取的桌面版 Chrome、Edge 或 Opera 開啟本頁。';
     if (!dirs.input) return '請選擇原始 DICOM 資料夾。';
     if (!inputs.length) return '輸入資料夾沒有可掃描的檔案，請重新選擇。';
-    if (!dirs.images) return '請選擇研究影像輸出資料夾。';
-    if (!dirs.records) return '請選擇院內紀錄資料夾。';
+    if (!dirs.output) return '請選擇輸出資料夾。';
     if (!mode) return '請選擇本批處理模式。';
     if (mode==='csv' && !imported) return '請匯入有效的研究名單 CSV。';
     return '';
@@ -51,29 +64,34 @@ function refresh() {
     $('ignoreLabel').hidden=!imported?.includesStudyDate;
     $('tagCount').textContent=currentTags().length+' 項';
     $('allTags').textContent=tagBoxes.every(b=>b.checked)?'全部取消':'全選';
-    const parts=[['輸入',dirs.input?dirs.input.name+' · '+inputs.length+' 個待掃描檔案':'待選擇'],
+    const parts=[['輸入資料夾',dirs.input?dirs.input.name+' · '+inputs.length+' 個待掃描檔案':'待選擇'],
+        ['輸出資料夾',dirs.output?.name || '待選擇'],
+        ['影像位置',dirs.output?'研究影像/':'待選擇'],
+        ['對照資料',dirs.output?'院內對照表_不可對外提供/':'待選擇'],
         ['處理模式',mode==='auto'?'自動編號':mode==='csv'?'CSV 指定代號':'待選擇'],
-        ['篩選條件',mode?dateRule():'待選擇'],['研究影像',dirs.images?.name || '待選擇'],
-        ['院內紀錄',dirs.records?.name || '待選擇']];
+        ['篩選條件',mode?dateRule():'待選擇']];
     $('summary').replaceChildren(...parts.flatMap(([k,v])=>[el('dt',k),el('dd',v)]));
 }
 function invalidate(){$('results').hidden=true;$('progressPanel').hidden=true;refresh();}
-function notice(text){$('resultTitle').textContent='作業未完成';$('stats').replaceChildren();const p=el('p',text);p.className='error';$('notes').replaceChildren(p);$('matches').hidden=true;$('failures').hidden=true;$('results').hidden=false;log(text);}
+function notice(text){$('resultTitle').textContent='作業未完成';$('stats').replaceChildren();const p=el('p',text);p.className='error';$('notes').replaceChildren(p);$('matches').hidden=true;$('failures').hidden=true;$('results').hidden=false;log(text,'error');}
 async function working(task) {
     if (busy) return;
     busy=true;refresh();
     try{await task();}catch(e){if(e.name!=='AbortError')notice(e.message || String(e));}
     finally{busy=false;refresh();}
 }
-for(const id of Object.keys(dirs)) $(id).onclick=()=>working(async()=>{
+for(const id of selectedDirs) $(id).onclick=()=>working(async()=>{
     const dir=await window.showDirectoryPicker({mode:id==='input'?'read':'readwrite'});
     const proposed={...dirs,[id]:dir};
-    await Batch.independent(Object.fromEntries(Object.entries(proposed).map(([k,v])=>[roles[k],v])));
+    await Batch.independent({'輸入資料夾':proposed.input,'輸出資料夾':proposed.output});
+    if(id==='output')await Batch.checkOutputRoot(dir);
     if(id==='input') {
         phase('掃描輸入資料夾',0,0);
         inputs=(await Batch.collect(dir)).sort((a,b)=>a.path<b.path?-1:a.path>b.path?1:0);
+        log('已掃描 '+inputs.length+' 個輸入檔案。');
     }
-    dirs[id]=dir;$(id).querySelector('span').textContent=dir.name;invalidate();
+    dirs[id]=dir;dirs.images=null;dirs.records=null;
+    $(id).querySelector('.folder-value').textContent=dir.name;invalidate();
 });
 for(const radio of document.querySelectorAll('[name=mode]')) radio.onchange=()=>{mode=radio.value;invalidate();};
 $('ignore').onchange=invalidate;
@@ -115,6 +133,7 @@ function render(title,stats,notes,failed,report,preview) {
     $('matches').hidden=!report.length;$('matches').open=false;
     if(report.length)table('matchTable',['來源','病歷號','日期','原因'],report.map(r=>[r.source,r.patientId,r.studyDate,r.reason]));
     $('results').hidden=false;
+    if(failed.length || notes.some(([,type])=>type==='error'))$('logPanel').open=true;
     $('phase').textContent=preview?'預檢完成':title;
 }
 function errorReason(e){return e?.message || String(e);}
@@ -133,16 +152,19 @@ async function readInput(item,preview) {
     }
 }
 async function execute(preview) {
-    $('results').hidden=true;phase('檢查本批設定',0,0);
+    $('results').hidden=true;phase(preview?'預檢本批設定':'檢查本批設定',0,0);
+    log(preview?'開始名單預檢（不會建立資料夾或寫入檔案）。':'開始核對既有輸出及轉換。');
     const isCsv=mode==='csv', mapping=isCsv?imported.mapping:new Map();
     const dated=isCsv && imported.includesStudyDate;
     const allowOther=dated && $('ignore').checked;
     const match=Core.createCsvMatcher(mapping,dated);
+    const layout=await Batch.outputLayout(dirs.output,!preview);
     let state;
-    if(dirs.images && dirs.records) {
+    if(layout){
+        dirs.images=layout.images;dirs.records=layout.records;
         state=await Batch.prepare(dirs.images,dirs.records,mapping,dated,(n,total)=>phase('核對既有輸出影像',n,total));
         if(!preview)await Batch.pair(state);
-    }
+    } else if(!preview)throw Error('無法建立輸出資料夾，請確認存取權限。');
     const exact=new Set(), otherDates=new Map(), combos=new Map(), ambiguous=new Set(), failed=[], notes=[];
     const counts={written:0,exists:0,skipped:0,candidate:0};
     const tags=currentTags();
@@ -190,7 +212,7 @@ async function execute(preview) {
         for(const [name,save] of writes)try{await save();}catch(e){reportErrors++;notes.push([name+' 儲存失敗：'+errorReason(e),'error']);}
         const emptyCount=[...state.emptySlots.values()].reduce((count,slots)=>count+slots.length,0);
         if(emptyCount){reportErrors++;notes.push(['影像目錄仍有 '+emptyCount+' 個先前中斷留下的空檔，請核對後再交付。','warn']);}
-        notes.push(['影像位置：'+dirs.images.name+'。院內紀錄位置：'+dirs.records.name+'。']);
+        notes.push(['研究影像位置：'+dirs.output.name+'/研究影像。院內對照表位置：'+dirs.output.name+'/院內對照表_不可對外提供（不得對外分享）。']);
         const selected=optionalTags.filter(([code])=>tags.includes('x'+code)).map(([,title])=>title);
         notes.push(['本批寫出設定：改寫病歷號、檢查單號及原有姓名。額外清除的欄位（若存在）：'+(selected.join('、')||'無')+'。']);
         notes.push(['對外分享前仍須核查 Sequence、私有標籤與影像上燒錄的文字。','warn']);
@@ -204,7 +226,7 @@ async function execute(preview) {
     stats.push([preview?'預計新增（檔）':'成功寫出（檔）',preview?counts.candidate:counts.written],
         [preview?'既有 UID（檔）':'既有內容相同（檔）',counts.exists],['名單略過（檔）',counts.skipped],['失敗（檔）',failed.length]);
     const title=preview?'名單預檢結果':failed.length||reportErrors?'轉換結束，請檢查失敗項目':'研究代號轉換完成';
-    render(title,stats,notes,failed,report,preview);log(title+' · '+inputs.length+' 個輸入檔案');
+    render(title,stats,notes,failed,report,preview);log(title+' · '+inputs.length+' 個輸入檔案',failed.length||reportErrors?'error':'success');
 }
 $('precheck').onclick=()=>working(()=>execute(true));
 $('start').onclick=()=>working(()=>navigator.locks.request('dicom-deid-export',{ifAvailable:true},lock=>{
@@ -212,11 +234,14 @@ $('start').onclick=()=>working(()=>navigator.locks.request('dicom-deid-export',{
 }));
 $('reset').onclick=()=>{
     if(busy)return;
-    for(const id of Object.keys(dirs)){dirs[id]=null;$(id).querySelector('span').textContent=folderHints[id];}
+    for(const id of Object.keys(dirs))dirs[id]=null;
+    for(const id of selectedDirs)$(id).querySelector('.folder-value').textContent=folderHints[id];
     inputs=[];mode='';imported=null;csvName='';failureCsvText='';matchCsvText='';
     for(const b of document.querySelectorAll('input[type=radio],input[type=checkbox]'))b.checked=false;
     for(const d of document.querySelectorAll('details'))d.open=false;
-    for(const id of ['log','stats','notes','failTable','matchTable'])$(id).replaceChildren();
+    for(const id of ['log','stats','notes','failTable','matchTable','terminalLog'])$(id).replaceChildren();
+    $('terminalLog').append(el('li','[System] 已重設本批，請重新選擇資料夾及處理模式。'));
+    $('counter').textContent='0 / 0';$('progressPct').textContent='0%';
     $('csvFile').value='';$('csvInfo').textContent='尚未匯入 CSV';invalidate();
 };
 refresh();
